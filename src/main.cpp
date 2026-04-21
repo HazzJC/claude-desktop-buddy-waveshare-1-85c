@@ -159,6 +159,14 @@ static bool tap(int x, int y, int w, int h) {
 static int16_t  _tpStartX = 0, _tpStartY = 0;
 static uint32_t _tpStartMs = 0;
 
+// Rect hit-test against the press-START position. Use on justReleased after
+// a gesture has been classified as a stationary tap — so a tap with minor
+// finger drift still targets the region the user pressed on.
+static bool tappedFrom(int x, int y, int w, int h) {
+  return _tpStartX >= x && _tpStartY >= y &&
+         _tpStartX <  x + w && _tpStartY <  y + h;
+}
+
 // After a user interaction in clock mode (pet tap or species swipe), keep the
 // buddy awake for this long — otherwise the time-of-day logic snaps back to
 // P_SLEEP the instant the one-shot animation expires.

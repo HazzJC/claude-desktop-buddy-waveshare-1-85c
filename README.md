@@ -1,4 +1,4 @@
-# claude-desktop-buddy — ESP32-S3 AMOLED port
+# claude-desktop-buddy — ESP32 AMOLED port
 
 <img src="image.jpg" width="400" />
 
@@ -7,7 +7,7 @@ maker devices over BLE, so developers and makers can build hardware that
 displays permission prompts, recent messages, and other interactions.
 
 This is a port of [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
-(originally targeting M5StickC Plus) to two Waveshare ESP32-S3 AMOLED
+(originally targeting M5StickC Plus) to three Waveshare ESP32 AMOLED
 boards. The BLE wire protocol is unchanged — same pairing, same desktop
 apps, just a larger screen.
 
@@ -17,29 +17,29 @@ apps, just a larger screen.
 
 ## Supported boards
 
-Both run the **same main.cpp / UI** — board-specific wiring, drivers and
+All three run the **same main.cpp / UI** — board-specific wiring, drivers and
 canvas→panel scaling are isolated in `src/hw/` + one header per board
 under `src/boards/`.
 
-| | [ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8) | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75C) |
-| --- | --- | --- |
-| MCU | ESP32-S3R8 (8 MB OPI PSRAM, 8 MB flash) | same |
-| Panel | 1.8" **rectangular** 368×448 AMOLED | 1.75" **round** 466×466 AMOLED |
-| Display driver | SH8601 (QSPI) | CO5300 (QSPI) |
-| Touch | FT3168 @ 0x38 | CST92xx @ 0x5A |
-| GPIO expander | TCA9554 (LCD/TP resets routed through it) | none — resets are direct GPIOs |
-| RTC | PCF85063 (I²C) | none — software clock synced from desktop |
-| IMU | QMI8658 | same |
-| PMU | AXP2101 | same |
-| Audio | ES8311 + amp + speaker | same |
-| Buttons | Key1 (GPIO0 BOOT) + AXP PEK | same (physical layout swapped; corrected in firmware) |
-| Canvas → panel | 184×224 canvas → **2× nearest-neighbor** → 368×448 | 184×224 canvas → **1.5× bilinear** → 276×336 centred in 466×466 (black border) |
+| | [ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8) | [ESP32-S3-Touch-AMOLED-1.75C](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75C) | [ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/wiki/ESP32-C6-Touch-AMOLED-2.16) |
+| --- | --- | --- | --- |
+| MCU | ESP32-S3R8 (8 MB OPI PSRAM, 8 MB flash) | same | ESP32-C6FH8 (160 MHz RISC-V single-core, 8 MB flash, **no PSRAM**) |
+| Panel | 1.8" **rectangular** 368×448 AMOLED | 1.75" **round** 466×466 AMOLED | 2.16" **rounded-square** 480×480 AMOLED |
+| Display driver | SH8601 (QSPI) | CO5300 (QSPI) | SH8601 (QSPI) |
+| Touch | FT3168 @ 0x38 | CST92xx @ 0x5A | CST9217 @ 0x5A |
+| GPIO expander | TCA9554 (LCD/TP resets routed through it) | none — resets are direct GPIOs | none — resets are direct GPIOs |
+| RTC | PCF85063 (I²C) | none — software clock synced from desktop | PCF85063 (I²C) |
+| IMU | QMI8658 | same | same |
+| PMU | AXP2101 | same | same |
+| Audio | ES8311 + amp + speaker | same | ES8311 + ES7210 (output + mic codec) |
+| Buttons | Key1 (GPIO0 BOOT) + AXP PEK | same (physical layout swapped; corrected in firmware) | three: PWR/IO10/BOOT; PWR is active-HIGH via MOSFET inverter + AXP PWRON |
+| Canvas → panel | 184×224 canvas → **2× nearest-neighbor** → 368×448 | 184×224 canvas → **1.5× bilinear** → 276×336 centred in 466×466 (black border) | 184×224 canvas → **2× nearest-neighbor** → 368×448 centred at (56, 16) in 480×480 (56 px L/R / 16 px T/B black border) |
 
-Internal canvas is **184×224** on both. The 1.75C rounds the content
+Internal canvas is **184×224** on all three. The 1.75C rounds the content
 inside its circular bezel; keeping the logical canvas identical means
 UI code, fonts and all buddy rendering are completely board-agnostic.
 
-The firmware targets ESP32-S3 with Arduino framework 3.x via the
+The firmware targets ESP32-S3 and ESP32-C6 with Arduino framework 3.x via the
 [pioarduino](https://github.com/pioarduino/platform-espressif32) platform.
 
 ## Flashing
@@ -49,11 +49,14 @@ Install
 then pick the env that matches your board:
 
 ```bash
-# 1.8"  rectangular AMOLED
+# 1.8" rectangular AMOLED (ESP32-S3)
 pio run -e waveshare-esp32s3-touch-amoled-1-8 -t upload
 
-# 1.75C round AMOLED
+# 1.75C round AMOLED (ESP32-S3)
 pio run -e waveshare-esp32s3-touch-amoled-1-75c -t upload
+
+# 2.16" rounded-square AMOLED (ESP32-C6)
+pio run -e waveshare-esp32c6-touch-amoled-2-16 -t upload
 ```
 
 If you're starting from a previously-flashed device (e.g. the factory
@@ -94,6 +97,8 @@ auto-reconnects whenever both sides are awake.
 
 ## Controls
 
+### ESP32-S3 boards (1.8 & 1.75C)
+
 The board has two physical keys. **Key1** is the BOOT button (acts as
 "A" in the table). **Key3** is the AXP power key — short-press is "B",
 long-press toggles screen off, very-long-press hardware-shuts-down.
@@ -105,6 +110,23 @@ long-press toggles screen off, very-long-press hardware-shuts-down.
 | **Hold Key1**            | menu                 | menu        | menu        | menu        |
 | **Key3** (PWR, ~1s long) | toggle screen off    |             |             |             |
 | **Key3** (PWR, ~6s)      | hard power off       |             |             |             |
+| **Shake**                | dizzy                |             |             | —           |
+| **Face-down**            | nap (energy refills) |             |             |             |
+
+### ESP32-C6-Touch-AMOLED-2.16 controls
+
+The board has three physical keys:
+- **PWR** (middle) — primary action / confirm (= A button)
+- **IO10** (left) — secondary / back / scroll (= B button)
+- **BOOT** (right) — open menu shortcut
+
+|                          | Normal               | Pet         | Info        | Approval    |
+| ------------------------ | -------------------- | ----------- | ----------- | ----------- |
+| **PWR** (middle)         | next screen          | next screen | next screen | **approve** |
+| **IO10** (left, short)   | scroll transcript    | next page   | next page   | **deny**    |
+| **Hold PWR**             | menu                 | menu        | menu        | menu        |
+| **BOOT** (right)         | open menu (shortcut) | open menu   | open menu   | open menu   |
+| **PWR held 4 s**         | power off (AXP cuts ALDO3; press again to wake) |             |             |             |
 | **Shake**                | dizzy                |             |             | —           |
 | **Face-down**            | nap (energy refills) |             |             |             |
 

@@ -26,9 +26,10 @@ void hwInit() {
   delay(50);
   hwPmuRef()->enableALDO3();
   delay(50);
-#else
-  hwExpanderResetSequence();
 #endif
+  // Toggles PIN_TP_RESET on all boards; PIN_LCD_RESET only on non-PMU
+  // boards (gated inside the function via BOARD_LCD_RST_VIA_PMU).
+  hwExpanderResetSequence();
   if (!hwDisplayInit())   die("display");
 #if !BOARD_LCD_RST_VIA_PMU
   if (!hwPowerInit())     die("power");

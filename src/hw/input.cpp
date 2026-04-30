@@ -62,13 +62,52 @@ bool hwInputInit() {
 
 static void scanKey1() {
   uint32_t now = millis();
+#if BOARD_KEY1_ACTIVE_HIGH
+  bool pressed = digitalRead(PIN_KEY1) == HIGH;
+#else
   bool pressed = digitalRead(PIN_KEY1) == LOW;
+#endif
   s_a.wasPressed  = pressed && !s_a.isPressed;
   s_a.wasReleased = !pressed && s_a.isPressed;
   if (s_a.wasPressed) s_a.pressedAt = now;
   s_a.isPressed = pressed;
 }
 
+#if BOARD_HAS_KEY2
+static void scanKey2() {
+  uint32_t now = millis();
+  bool pressed = digitalRead(PIN_KEY2) == LOW;
+  s_b.wasPressed  = pressed && !s_b.isPressed;
+  s_b.wasReleased = !pressed && s_b.isPressed;
+  if (s_b.wasPressed) s_b.pressedAt = now;
+  s_b.isPressed = pressed;
+}
+#endif
+
+#if BOARD_BTN_THIRD
+// BOOT key (GPIO9 on 2.16) acts as a menu shortcut: a short tap synthesises
+// BTN_A_LONG_PRESS, which main.cpp's existing handler treats as "open menu".
+// main.cpp itself is unchanged.
+static uint32_t s_bootPressedAt = 0;
+static void scanBootKey() {
+  bool pressed = digitalRead(PIN_KEY_BOOT) == LOW;
+  if (pressed && !s_bootPressedAt) {
+    s_bootPressedAt = millis();
+  } else if (!pressed && s_bootPressedAt) {
+    uint32_t held = millis() - s_bootPressedAt;
+    s_bootPressedAt = 0;
+    if (held > 30 && held < 1000) {
+      // Synthesise a long-press of A so the menu opens.
+      s_a.wasPressed  = true;
+      s_a.wasReleased = true;
+      s_a.pressedAt   = millis() - 1500;  // > LONG_PRESS_MS so isLongPress check passes
+      s_a.isPressed   = false;
+    }
+  }
+}
+#endif
+
+#if !BOARD_HAS_KEY2
 static void scanAxp() {
   if (hwExpanderAxpIrqLow()) {
     if (hwAxpPekeyShortPress()) s_axpEvt = 0x02;
@@ -82,6 +121,7 @@ static void scanAxp() {
   if (pressed) s_axpEvt = 0;
   // 0x04 stays in s_axpEvt until consumed by hwAxpBtnEvent()
 }
+#endif
 
 static void scanTouch() {
   // Poll when IRQ fires OR when a finger was down last frame — both FT3168
@@ -117,8 +157,16 @@ static void scanTouch() {
       s_tp.x = tx;
       s_tp.y = ty;
     #else
-      s_tp.x = x[0] / 2;
-      s_tp.y = y[0] / 2;
+      // Non-letterbox: physical → canvas via OFFSET subtract + 2× downscale.
+      // OFFSET is 0 on 1.8 (full-fill), 56/16 on 2.16 (centred 368×448 in 480×480).
+      int dx = x[0] - BOARD_DISPLAY_OFFSET_X;
+      int dy = y[0] - BOARD_DISPLAY_OFFSET_Y;
+      int tx = dx / 2;
+      int ty = dy / 2;
+      if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
+      if (ty < 0) ty = 0; else if (ty >= BOARD_HW_H) ty = BOARD_HW_H - 1;
+      s_tp.x = tx;
+      s_tp.y = ty;
     #endif
     s_tp.down = true;
   } else {
@@ -136,8 +184,14 @@ static void scanTouch() {
         Arduino_IIC_Touch::Value_Information::TOUCH_COORDINATE_Y);
     s_tp.justPressed  = !s_tp.down;
     s_tp.justReleased = false;
-    s_tp.x = rx / 2;   // 368 → 184
-    s_tp.y = ry / 2;   // 448 → 224
+    int dx = rx - BOARD_DISPLAY_OFFSET_X;
+    int dy = ry - BOARD_DISPLAY_OFFSET_Y;
+    int tx = dx / 2;
+    int ty = dy / 2;
+    if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
+    if (ty < 0) ty = 0; else if (ty >= BOARD_HW_H) ty = BOARD_HW_H - 1;
+    s_tp.x = tx;
+    s_tp.y = ty;
     s_tp.down = true;
   } else {
     s_tp.justReleased = s_tp.down;
@@ -149,7 +203,14 @@ static void scanTouch() {
 
 void hwInputUpdate() {
   scanKey1();
+#if BOARD_HAS_KEY2
+  scanKey2();
+#else
   scanAxp();
+#endif
+#if BOARD_BTN_THIRD
+  scanBootKey();
+#endif
   scanTouch();
 }
 

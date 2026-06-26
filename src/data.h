@@ -42,21 +42,17 @@ struct TamaState {
 static uint32_t _lastLiveMs = 0;
 static uint32_t _lastBtByteMs = 0;   // hasClient() lies; track actual BT traffic
 static bool     _demoMode   = false;
-static uint8_t  _demoIdx    = 0;
-static uint32_t _demoNext   = 0;
-
-struct _Fake { const char* n; uint8_t t,r,w; bool c; uint32_t tok; };
-static const _Fake _FAKES[] = {
-  {"asleep",0,0,0,false,0}, {"one idle",1,0,0,false,12000},
-  {"busy",4,3,0,false,89000}, {"attention",2,1,1,false,45000},
-  {"completed",1,0,0,true,142000},
-};
+static uint8_t  _demoStage  = 0;
+static uint32_t _demoStageStart = 0;
+static const uint32_t DEMO_STAGE_MS = 7000;
+static const uint8_t DEMO_STAGE_COUNT = 6;
 
 inline void dataSetDemo(bool on) {
   _demoMode = on;
-  if (on) { _demoIdx = 0; _demoNext = millis(); }
+  if (on) { _demoStage = 0; _demoStageStart = millis(); }
 }
 inline bool dataDemo() { return _demoMode; }
+inline uint8_t dataDemoStage() { return _demoMode ? _demoStage : 0xFF; }
 
 inline bool dataConnected() {
   return _lastLiveMs != 0 && (millis() - _lastLiveMs) <= 30000;
@@ -68,9 +64,26 @@ inline bool dataBtActive() {
 }
 
 inline const char* dataScenarioName() {
-  if (_demoMode) return _FAKES[_demoIdx].n;
+  if (_demoMode) {
+    static const char* const names[] = {
+      "demo home", "demo pet", "demo approve", "demo choose", "demo usage", "demo level"
+    };
+    return names[_demoStage % DEMO_STAGE_COUNT];
+  }
   if (dataConnected()) return dataBtActive() ? "bt" : "usb";
   return "none";
+}
+
+inline void dataClearDemoState(TamaState* out) {
+  if (!out) return;
+  out->promptId[0] = 0;
+  out->promptTool[0] = 0;
+  out->promptHint[0] = 0;
+  out->questionId[0] = 0;
+  out->questionText[0] = 0;
+  out->questionCount = 0;
+  out->usageValid = false;
+  out->recentlyCompleted = false;
 }
 
 // Set true once the bridge sends a time sync — until then the RTC may
@@ -267,12 +280,83 @@ inline void dataPoll(TamaState* out) {
   uint32_t now = millis();
 
   if (_demoMode) {
-    if (now >= _demoNext) { _demoIdx = (_demoIdx + 1) % 5; _demoNext = now + 8000; }
-    const _Fake& s = _FAKES[_demoIdx];
-    out->sessionsTotal=s.t; out->sessionsRunning=s.r; out->sessionsWaiting=s.w;
-    out->recentlyCompleted=s.c; out->tokensToday=s.tok; out->lastUpdated=now;
+    static uint8_t lastDemoStage = 0xFF;
+    if (now - _demoStageStart >= DEMO_STAGE_MS) {
+      _demoStage = (_demoStage + 1) % DEMO_STAGE_COUNT;
+      _demoStageStart = now;
+    }
+    bool stageChanged = (_demoStage != lastDemoStage);
+    lastDemoStage = _demoStage;
+    dataClearDemoState(out);
+    out->sessionsTotal = 2;
+    out->sessionsRunning = 0;
+    out->sessionsWaiting = 0;
+    out->tokensToday = 48200;
+    out->lastUpdated = now;
     out->connected = true;
-    snprintf(out->msg, sizeof(out->msg), "demo: %s", s.n);
+    out->usageValid = true;
+    out->usageSessionPct = 38;
+    out->usageWeekPct = 62;
+    out->usageSessionResetSec = 53 * 60;
+    out->usageWeekResetSec = 2UL * 24UL * 3600UL + 6UL * 3600UL;
+    out->nLines = 2;
+
+    switch (_demoStage) {
+      case 0:
+        snprintf(out->msg, sizeof(out->msg), "demo: widgets");
+        strncpy(out->lines[0], "Home shows usage when the bridge sends it.", sizeof(out->lines[0]) - 1);
+        strncpy(out->lines[1], "Swipe or open menu: demo keeps walking.", sizeof(out->lines[1]) - 1);
+        break;
+      case 1:
+        snprintf(out->msg, sizeof(out->msg), "demo: pet");
+        strncpy(out->lines[0], "Tap the buddy to pet it.", sizeof(out->lines[0]) - 1);
+        strncpy(out->lines[1], "A quick hand and heart appear.", sizeof(out->lines[1]) - 1);
+        break;
+      case 2:
+        out->sessionsWaiting = 1;
+        snprintf(out->msg, sizeof(out->msg), "demo: approve");
+        strncpy(out->promptId, "demo-permission", sizeof(out->promptId) - 1);
+        strncpy(out->promptTool, "Edit file", sizeof(out->promptTool) - 1);
+        strncpy(out->promptHint, "Allow this demo change?", sizeof(out->promptHint) - 1);
+        strncpy(out->lines[0], "Permission prompt: tap approve or deny.", sizeof(out->lines[0]) - 1);
+        strncpy(out->lines[1], "Demo responses stay on-device.", sizeof(out->lines[1]) - 1);
+        break;
+      case 3:
+        snprintf(out->msg, sizeof(out->msg), "demo: choose");
+        strncpy(out->questionId, "demo-question", sizeof(out->questionId) - 1);
+        strncpy(out->questionText, "Pick a demo snack for the buddy", sizeof(out->questionText) - 1);
+        strncpy(out->questionOptions[0], "Tiny battery cake", sizeof(out->questionOptions[0]) - 1);
+        strncpy(out->questionOptions[1], "Pixel sandwich", sizeof(out->questionOptions[1]) - 1);
+        strncpy(out->questionOptions[2], "Debug biscuits", sizeof(out->questionOptions[2]) - 1);
+        strncpy(out->questionOptions[3], "Fresh tokens", sizeof(out->questionOptions[3]) - 1);
+        out->questionCount = 4;
+        strncpy(out->lines[0], "Question mode: tap an answer.", sizeof(out->lines[0]) - 1);
+        strncpy(out->lines[1], "BOOT cycles; side switch confirms.", sizeof(out->lines[1]) - 1);
+        break;
+      case 4:
+        out->usageSessionPct = 74;
+        out->usageWeekPct = 46;
+        out->usageSessionResetSec = 12 * 60;
+        out->usageWeekResetSec = 4UL * 24UL * 3600UL + 3UL * 3600UL;
+        snprintf(out->msg, sizeof(out->msg), "demo: usage");
+        strncpy(out->lines[0], "Usage is bridge-provided, not guessed.", sizeof(out->lines[0]) - 1);
+        strncpy(out->lines[1], "Settings widgets: off, simple, fun.", sizeof(out->lines[1]) - 1);
+        break;
+      default:
+        out->recentlyCompleted = true;
+        out->tokensToday = 50120;
+        out->usageSessionPct = 21;
+        out->usageWeekPct = 18;
+        out->usageSessionResetSec = 3 * 3600UL + 41 * 60UL;
+        out->usageWeekResetSec = 6UL * 24UL * 3600UL + 1UL * 3600UL;
+        snprintf(out->msg, sizeof(out->msg), "demo: level up");
+        strncpy(out->lines[0], "Level up celebrates every 50K tokens.", sizeof(out->lines[0]) - 1);
+        strncpy(out->lines[1], "Demo animation does not save fake stats.", sizeof(out->lines[1]) - 1);
+        break;
+    }
+    out->lines[0][sizeof(out->lines[0]) - 1] = 0;
+    out->lines[1][sizeof(out->lines[1]) - 1] = 0;
+    if (stageChanged) out->lineGen++;
     return;
   }
 

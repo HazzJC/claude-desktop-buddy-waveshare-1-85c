@@ -105,7 +105,8 @@ from the desktop Bluetooth settings before pairing again.
 - Battery + other screens: screen sleeps after 30 seconds
 - Approval prompt visible: screen stays awake
 
-Any BOOT press, side-switch action, or screen tap wakes the display.
+Any BOOT press, side-switch action, or screen tap wakes the display and holds
+it awake for at least 30 seconds.
 
 ## Per-State Animations
 
@@ -127,7 +128,9 @@ them and persists the choice in NVS.
 If the desktop bridge sends optional `usage` data, the home screen can show
 4-hour session and weekly usage. Simple mode shows compact percentage bars
 with reset countdowns. Fun mode shows small water bottles whose fill indicates
-usage remaining. Missing usage data hides the widgets.
+usage remaining. Missing usage data hides the widgets. The firmware does not
+estimate Claude quota from token counts; real widgets require explicit bridge
+fields. Demo mode uses synthetic usage values to preview the interface.
 
 ## Pet Stats
 

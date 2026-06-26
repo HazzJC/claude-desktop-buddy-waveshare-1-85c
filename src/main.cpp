@@ -85,6 +85,7 @@ bool     dimmed = false;
 bool     screenOff = false;
 bool     swallowBtnA = false;
 bool     swallowBtnB = false;
+bool     swallowTouch = false;
 bool     buddyMode = false;
 bool     gifAvailable = false;
 const uint8_t SPECIES_GIF = 0xFF;   // species NVS sentinel: use the installed GIF
@@ -150,6 +151,11 @@ static void wake() {
   }
   if (dimmed) { applyBrightness(); dimmed = false; }
 }
+
+static void markUserInteraction() {
+  wake();
+}
+
 bool     responseSent = false;
 bool     questionResponseSent = false;
 uint8_t  questionSel = 0;
@@ -273,6 +279,12 @@ static size_t jsonEscape(char* out, size_t n, const char* in) {
 }
 
 static void sendPermissionDecision(bool approve) {
+  if (dataDemo()) {
+    responseSent = true;
+    beep(approve ? 2400 : 600, 60);
+    triggerOneShot(approve ? P_HEART : P_IDLE, approve ? 1600 : 800);
+    return;
+  }
   char cmd[112];
   snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}",
            tama.promptId, approve ? "once" : "deny");
@@ -291,6 +303,12 @@ static void sendPermissionDecision(bool approve) {
 
 static void sendQuestionAnswer(uint8_t idx) {
   if (idx >= tama.questionCount) return;
+  if (dataDemo()) {
+    questionResponseSent = true;
+    beep(2400, 60);
+    triggerOneShot(P_HEART, 1200);
+    return;
+  }
   char id[88], answer[140], cmd[280];
   jsonEscape(id, sizeof(id), tama.questionId);
   jsonEscape(answer, sizeof(answer), tama.questionOptions[idx]);
@@ -552,7 +570,19 @@ void menuConfirm() {
       applyDisplayMode();
       characterInvalidate();
       break;
-    case 4: dataSetDemo(!dataDemo()); break;
+    case 4: {
+      bool on = !dataDemo();
+      dataSetDemo(on);
+      if (!on) dataClearDemoState(&tama);
+      responseSent = false;
+      questionResponseSent = false;
+      menuOpen = false;
+      displayMode = DISP_NORMAL;
+      applyDisplayMode();
+      characterInvalidate();
+      if (buddyMode) buddyInvalidate();
+      break;
+    }
     case 5: menuOpen = false; characterInvalidate(); break;
   }
 }
@@ -1260,6 +1290,25 @@ void loop() {
   uint32_t now = millis();
 
   dataPoll(&tama);
+  static uint8_t lastDemoStage = 0xFF;
+  uint8_t demoStage = dataDemoStage();
+  if (demoStage != lastDemoStage) {
+    lastDemoStage = demoStage;
+    if (dataDemo()) {
+      displayMode = DISP_NORMAL;
+      menuOpen = settingsOpen = resetOpen = false;
+      applyDisplayMode();
+      characterInvalidate();
+      if (buddyMode) buddyInvalidate();
+      if (demoStage == 1) {
+        triggerOneShot(P_HEART, 1800);
+        triggerPetCursor(CX + 16, 104);
+        _playfulUntil = millis() + PLAYFUL_MS;
+      } else if (demoStage == 5) {
+        triggerOneShot(P_CELEBRATE, 3200);
+      }
+    }
+  }
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
 
@@ -1334,15 +1383,15 @@ void loop() {
       if (hwBtnA().isPressed) swallowBtnA = true;
       if (hwBtnB().isPressed) swallowBtnB = true;
     }
-    wake();
+    markUserInteraction();
   }
 
   // Optional power-key path retained for HAL compatibility.
   // Very-long-press (6s) still powers off via AXP hardware.
   if (hwAxpBtnEvent() == 0x04) {
-    if (screenOff) {
-      wake();
-    } else {
+    bool wasOff = screenOff;
+    markUserInteraction();
+    if (!wasOff) {
       hwDisplaySleep(true);
       screenOff = true;
     }
@@ -1440,11 +1489,18 @@ void loop() {
                  && dataRtcValid();
 
   const HwTouch& tp = hwTouch();
-  if (tp.justPressed) { _tpStartX = tp.x; _tpStartY = tp.y; _tpStartMs = millis(); }
+  if (tp.justPressed) {
+    bool wasOff = screenOff || dimmed;
+    markUserInteraction();
+    if (wasOff) swallowTouch = true;
+    _tpStartX = tp.x; _tpStartY = tp.y; _tpStartMs = millis();
+  }
 
   // Approval: tap upper half of the approval area = approve,
   //           tap lower half = deny.
-  if (inPermission) {
+  if (swallowTouch && tp.justReleased) {
+    swallowTouch = false;
+  } else if (!swallowTouch && inPermission) {
     const int APPROVAL_TOP = H - 112;
     if (tap(0, APPROVAL_TOP,      W, 56)) {
       sendPermissionDecision(true);
@@ -1452,7 +1508,7 @@ void loop() {
     if (tap(0, APPROVAL_TOP + 56, W, 56)) {
       sendPermissionDecision(false);
     }
-  } else if (inQuestion) {
+  } else if (!swallowTouch && inQuestion) {
     const HwTouch& t = hwTouch();
     if (t.justPressed) {
       for (uint8_t i = 0; i < tama.questionCount && i < 4; i++) {
@@ -1465,7 +1521,7 @@ void loop() {
         }
       }
     }
-  } else if (menuOpen || settingsOpen || resetOpen) {
+  } else if (!swallowTouch && (menuOpen || settingsOpen || resetOpen)) {
     // Tap a menu row → directly select + confirm. Reuses the layout
     // constants from drawMenu/drawSettings/drawReset.
     int n = menuOpen ? MENU_N : settingsOpen ? SETTINGS_N : RESET_N;
@@ -1518,7 +1574,7 @@ void loop() {
   // accidental drag can't mis-decide.
 
   if (tp.justReleased
-      && !inPrompt && !menuOpen && !settingsOpen && !resetOpen
+      && !swallowTouch && !inPrompt && !menuOpen && !settingsOpen && !resetOpen
       && !napping && !screenOff) {
     int dx = (int)tp.x - _tpStartX;
     int dy = (int)tp.y - _tpStartY;
@@ -1574,6 +1630,7 @@ void loop() {
       }
     }
   }
+  if (tp.justReleased) swallowTouch = false;
 
   // blink bookkeeping
 
@@ -1719,7 +1776,7 @@ void loop() {
   if (!screenOff && !inPrompt && !_onUsb) {
     uint32_t idleMs    = millis() - lastInteractMs;
     uint32_t threshold = clocking ? CLOCK_OFF_MS_BAT : SCREEN_OFF_MS;
-    if (idleMs > threshold) {
+    if (idleMs >= SCREEN_OFF_MS && idleMs > threshold) {
       hwDisplaySleep(true);
       screenOff = true;
     }

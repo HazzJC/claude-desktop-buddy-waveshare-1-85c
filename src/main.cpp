@@ -354,8 +354,8 @@ const uint8_t MENU_N = 6;
 
 bool    settingsOpen = false;
 uint8_t settingsSel  = 0;
-const char* settingsItems[] = { "rotate", "widgets", "bright", "sound", "pet", "hud", "alert", "bt", "reset", "cancel" };
-const uint8_t SETTINGS_N = 10;
+const char* settingsItems[] = { "rotate", "widgets", "bright", "sound", "pet", "hud", "alert", "reset", "cancel" };
+const uint8_t SETTINGS_N = 9;
 
 bool    resetOpen = false;
 uint8_t resetSel  = 0;
@@ -385,15 +385,8 @@ static void applySetting(uint8_t idx) {
     case 4: nextPet(); return;
     case 5: s.hud = !s.hud; break;
     case 6: s.led = !s.led; break;
-    case 7:
-      // BT toggle is a stored preference only — BLE stays live. Turning
-      // BLE off cleanly would require tearing down the BLE stack which
-      // the Arduino BLE library doesn't do reliably. If we need a
-      // hard-off someday, stop advertising via BLEDevice::getAdvertising().
-      s.bt = !s.bt;
-      break;
-    case 8: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
-    case 9: settingsOpen = false; characterInvalidate(); return;
+    case 7: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
+    case 8: settingsOpen = false; characterInvalidate(); return;
   }
   settingsSave();
 }
@@ -514,8 +507,8 @@ static void drawSettings() {
       spr.print(WM[s.widgetMode]);
     } else if (i == 2) {
       spr.printf("%u/4", brightLevel);
-    } else if (i == 3 || i == 5 || i == 6 || i == 7) {
-      bool on = (i == 3) ? s.sound : (i == 5) ? s.hud : (i == 6) ? s.led : s.bt;
+    } else if (i == 3 || i == 5 || i == 6) {
+      bool on = (i == 3) ? s.sound : (i == 5) ? s.hud : s.led;
       spr.setTextColor(on ? GREEN : p.textDim, PANEL);
       spr.print(on ? " on" : "off");
     } else if (i == 4) {
@@ -750,14 +743,13 @@ void drawInfo() {
     ln(p.textDim, "up %luh %02lum", up / 3600, (up / 60) % 60);
     ln(p.textDim, "heap %uKB", ESP.getFreeHeap() / 1024);
     ln(p.textDim, "bright %u/4", brightLevel);
-    ln(p.textDim, "bt %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
+    ln(p.textDim, "bt %s", dataBtActive() ? "linked" : "on");
 
   } else if (infoPage == 3) {
     _infoHeader(p, y, "BLUETOOTH", infoPage);
-    bool linked = settings().bt && dataBtActive();
+    bool linked = dataBtActive();
 
-    ln(linked ? GREEN : (settings().bt ? HOT : p.textDim),
-       "%s", linked ? "linked" : (settings().bt ? "discover" : "off"));
+    ln(linked ? GREEN : HOT, "%s", linked ? "linked" : "discover");
     gap();
     ln(p.text, "%s", btName);
     uint8_t mac[6] = {0};
@@ -769,7 +761,7 @@ void drawInfo() {
     if (linked) {
       uint32_t age = (millis() - tama.lastUpdated) / 1000;
       ln(p.textDim, "last msg %lus", (unsigned long)age);
-    } else if (settings().bt) {
+    } else {
       ln(p.text, "TO PAIR");
       ln(p.textDim, "Claude desktop");
       ln(p.textDim, "Developer");

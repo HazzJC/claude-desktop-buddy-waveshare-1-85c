@@ -192,7 +192,7 @@ static Settings _settings = { true, true, false, true, true, 0, 0, 1 };
 inline void settingsLoad() {
   _prefs.begin("buddy", true);
   _settings.sound = _prefs.getBool("s_snd", true);
-  _settings.bt    = _prefs.getBool("s_bt",  true);
+  _settings.bt    = true;
   _settings.wifi  = _prefs.getBool("s_wifi",false);
   _settings.led   = _prefs.getBool("s_led", true);
   _settings.hud      = _prefs.getBool("s_hud", true);
@@ -208,7 +208,8 @@ inline void settingsLoad() {
 inline void settingsSave() {
   _prefs.begin("buddy", false);
   _prefs.putBool("s_snd", _settings.sound);
-  _prefs.putBool("s_bt",  _settings.bt);
+  _settings.bt = true;
+  _prefs.putBool("s_bt",  true);
   _prefs.putBool("s_wifi",_settings.wifi);
   _prefs.putBool("s_led", _settings.led);
   _prefs.putBool("s_hud", _settings.hud);

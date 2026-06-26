@@ -88,6 +88,8 @@ class SecCallbacks : public BLESecurityCallbacks {
 
 void bleInit(const char* deviceName) {
   BLEDevice::init(deviceName);
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_DEFAULT);
+  BLEDevice::setPower(ESP_PWR_LVL_P9, ESP_BLE_PWR_TYPE_ADV);
   // Request the biggest MTU we can get. macOS negotiates to 185 typically.
   BLEDevice::setMTU(517);
 
@@ -125,17 +127,17 @@ void bleInit(const char* deviceName) {
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
   BLEAdvertising* adv = BLEDevice::getAdvertising();
-  // BLE legacy advertising has only 31 bytes. Put the human-readable name
-  // in the primary advertisement and the 128-bit Nordic UART service UUID in
-  // the scan response so both generic macOS scanners and Claude's service
-  // filter can discover us reliably.
+  // BLE legacy advertising has only 31 bytes. Keep the NUS UUID in the
+  // primary advert for service-filtered clients, plus a short recognizable
+  // name. Put the full per-device name in scan response for generic scanners.
   BLEAdvertisementData advData;
   advData.setFlags(0x06); // LE general discoverable + BR/EDR unsupported
-  advData.setName(deviceName);
+  advData.setCompleteServices(BLEUUID(NUS_SERVICE_UUID));
+  advData.setShortName("Claude");
   adv->setAdvertisementData(advData);
 
   BLEAdvertisementData scanRsp;
-  scanRsp.setCompleteServices(BLEUUID(NUS_SERVICE_UUID));
+  scanRsp.setName(deviceName);
   adv->setScanResponseData(scanRsp);
   adv->setScanResponse(true);
   adv->setMinPreferred(0x06);   // iOS-friendly connection interval

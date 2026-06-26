@@ -12,24 +12,36 @@ bool hwExpanderInit() {
   if (!g_expander.begin(0x20)) return false;
   g_expander.pinMode(EXIO_LCD_RESET,  OUTPUT);
   g_expander.pinMode(EXIO_TP_RESET,   OUTPUT);
+#ifdef EXIO_DSI_PWR_EN
   g_expander.pinMode(EXIO_DSI_PWR_EN, OUTPUT);
+#endif
+#ifdef EXIO_AXP_IRQ
   g_expander.pinMode(EXIO_AXP_IRQ,    INPUT);
+#endif
   return true;
 }
 
 void hwExpanderResetSequence() {
   g_expander.digitalWrite(EXIO_LCD_RESET,  LOW);
   g_expander.digitalWrite(EXIO_TP_RESET,   LOW);
+#ifdef EXIO_DSI_PWR_EN
   g_expander.digitalWrite(EXIO_DSI_PWR_EN, LOW);
+#endif
   delay(20);
   g_expander.digitalWrite(EXIO_LCD_RESET,  HIGH);
   g_expander.digitalWrite(EXIO_TP_RESET,   HIGH);
+#ifdef EXIO_DSI_PWR_EN
   g_expander.digitalWrite(EXIO_DSI_PWR_EN, HIGH);
+#endif
   delay(20);
 }
 
 bool hwExpanderAxpIrqLow() {
+#ifdef EXIO_AXP_IRQ
   return g_expander.digitalRead(EXIO_AXP_IRQ) == 0;
+#else
+  return true;
+#endif
 }
 
 #else  // No TCA9554
@@ -55,9 +67,8 @@ void hwExpanderResetSequence() {
   delay(20);
 }
 
-// AXP_IRQ is not wired to any GPIO on the 1.75C or C6.
-// Returning true causes scanAxp() in input.cpp to poll AXP PEK registers
-// via I2C every frame, which is fast enough and avoids a missed press.
+// Returning true lets the optional AXP polling path check PEK registers
+// without a dedicated interrupt pin.
 bool hwExpanderAxpIrqLow() {
   return true;
 }

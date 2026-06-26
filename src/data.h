@@ -11,6 +11,11 @@ struct TamaState {
   uint8_t  sessionsWaiting;
   bool     recentlyCompleted;
   uint32_t tokensToday;
+  uint8_t  usageSessionPct;
+  uint8_t  usageWeekPct;
+  uint32_t usageSessionResetSec;
+  uint32_t usageWeekResetSec;
+  bool     usageValid;
   uint32_t lastUpdated;
   char     msg[24];
   bool     connected;
@@ -20,6 +25,11 @@ struct TamaState {
   char     promptId[40];     // pending permission request ID; empty = no prompt
   char     promptTool[20];
   char     promptHint[44];
+  char     questionId[40];   // pending question request ID; empty = no question
+  char     questionText[160];
+  char     questionOptions[4][64];
+  uint8_t  questionCount;
+  uint16_t questionGen;
 };
 
 // ---------------------------------------------------------------------------
@@ -80,6 +90,23 @@ static void _matrixify(char* s) {
   }
 }
 
+static void _copyMatrix(char* dst, size_t n, const char* src) {
+  if (n == 0) return;
+  strncpy(dst, src ? src : "", n - 1);
+  dst[n - 1] = 0;
+  _matrixify(dst);
+}
+
+static const char* _textFromVariant(JsonVariant v) {
+  if (v.is<const char*>()) return v.as<const char*>();
+  if (v.is<JsonObject>()) {
+    JsonObject o = v.as<JsonObject>();
+    const char* s = o["label"] | o["text"] | o["title"] | o["value"] | o["question"];
+    return s ? s : "";
+  }
+  return "";
+}
+
 static void _applyJson(const char* line, TamaState* out) {
   JsonDocument doc;
   if (deserializeJson(doc, line)) return;
@@ -114,6 +141,22 @@ static void _applyJson(const char* line, TamaState* out) {
   uint32_t bridgeTokens = doc["tokens"] | 0;
   if (doc["tokens"].is<uint32_t>()) statsOnBridgeTokens(bridgeTokens);
   out->tokensToday = doc["tokens_today"] | out->tokensToday;
+  JsonObject usage = doc["usage"];
+  if (!usage.isNull() &&
+      usage["session_pct"].is<int>() && usage["session_reset_sec"].is<uint32_t>() &&
+      usage["week_pct"].is<int>() && usage["week_reset_sec"].is<uint32_t>()) {
+    int sp = usage["session_pct"].as<int>();
+    int wp = usage["week_pct"].as<int>();
+    if (sp < 0) sp = 0; else if (sp > 100) sp = 100;
+    if (wp < 0) wp = 0; else if (wp > 100) wp = 100;
+    out->usageSessionPct = (uint8_t)sp;
+    out->usageWeekPct = (uint8_t)wp;
+    out->usageSessionResetSec = usage["session_reset_sec"].as<uint32_t>();
+    out->usageWeekResetSec = usage["week_reset_sec"].as<uint32_t>();
+    out->usageValid = true;
+  } else {
+    out->usageValid = false;
+  }
   const char* m = doc["msg"];
   if (m) {
     strncpy(out->msg, m, sizeof(out->msg)-1); out->msg[sizeof(out->msg)-1]=0;
@@ -147,6 +190,56 @@ static void _applyJson(const char* line, TamaState* out) {
     // Don't matrixify promptId — it's an opaque token, must echo verbatim.
   } else {
     out->promptId[0] = 0; out->promptTool[0] = 0; out->promptHint[0] = 0;
+  }
+
+  JsonObject q = doc["question"];
+  JsonArray rootQuestions = doc["questions"];
+  if (q.isNull() && !rootQuestions.isNull() && rootQuestions.size() > 0 &&
+      rootQuestions[0].is<JsonObject>()) {
+    JsonObject first = rootQuestions[0].as<JsonObject>();
+    if (!first["options"].isNull() || !first["choices"].isNull() || !first["answers"].isNull()) {
+      q = first;
+    }
+  }
+  if (!q.isNull() || !rootQuestions.isNull()) {
+    char oldId[sizeof(out->questionId)];
+    strncpy(oldId, out->questionId, sizeof(oldId) - 1);
+    oldId[sizeof(oldId) - 1] = 0;
+
+    const char* qid = nullptr;
+    const char* text = nullptr;
+    JsonArray opts;
+    if (!q.isNull()) {
+      qid = q["id"] | q["request_id"] | doc["id"];
+      text = q["prompt"] | q["text"] | q["question"] | doc["prompt"];
+      opts = q["options"];
+      if (opts.isNull()) opts = q["choices"];
+      if (opts.isNull()) opts = q["answers"];
+      if (opts.isNull()) opts = q["questions"];
+    } else {
+      qid = doc["id"] | doc["request_id"];
+      text = doc["prompt"] | doc["text"] | doc["question"];
+      opts = rootQuestions;
+    }
+
+    strncpy(out->questionId, qid ? qid : "", sizeof(out->questionId) - 1);
+    out->questionId[sizeof(out->questionId) - 1] = 0;
+    _copyMatrix(out->questionText, sizeof(out->questionText),
+                text ? text : "Choose an option");
+    out->questionCount = 0;
+    for (JsonVariant v : opts) {
+      if (out->questionCount >= 4) break;
+      _copyMatrix(out->questionOptions[out->questionCount],
+                  sizeof(out->questionOptions[out->questionCount]),
+                  _textFromVariant(v));
+      if (out->questionOptions[out->questionCount][0]) out->questionCount++;
+    }
+    if (out->questionCount == 0) out->questionId[0] = 0;
+    if (strcmp(oldId, out->questionId) != 0) out->questionGen++;
+  } else {
+    out->questionId[0] = 0;
+    out->questionText[0] = 0;
+    out->questionCount = 0;
   }
   out->lastUpdated = millis();
   _lastLiveMs = millis();

@@ -1,221 +1,148 @@
-# claude-desktop-buddy — ESP32 AMOLED port
+# claude-desktop-buddy for Waveshare ESP32-S3-Touch-LCD-1.85C V2
 
 <img src="image.jpg" width="400" />
 
+This fork targets the
+[Waveshare ESP32-S3-Touch-LCD-1.85C V2 / Rev2.0](https://docs.waveshare.com/ESP32-S3-Touch-LCD-1.85C)
+only. It adapts the Claude Hardware Buddy firmware to the board's 1.85"
+round 360x360 ST77916 QSPI LCD, CST816 touch controller, BOOT button, and
+side slide switch.
+
 Claude for macOS and Windows can connect Claude Cowork and Claude Code to
-maker devices over BLE, so developers and makers can build hardware that
-displays permission prompts, recent messages, and other interactions.
+maker devices over BLE, so the device can show permission prompts, recent
+messages, status, and a little desktop buddy.
 
-This is a port of [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)
-(originally targeting M5StickC Plus) to four Waveshare ESP32 AMOLED
-boards. The BLE wire protocol is unchanged — same pairing, same desktop
-apps, just a larger screen.
+The BLE wire protocol is unchanged from
+[anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy):
+same pairing flow, same desktop apps, and same Hardware Buddy window.
 
-> **Building your own device?** You don't need any of the code here. See
-> **[REFERENCE.md](REFERENCE.md)** for the wire protocol: Nordic UART
-> Service UUIDs, JSON schemas, and the folder push transport.
+## Board Target
 
-## Supported boards
+- Board: Waveshare ESP32-S3-Touch-LCD-1.85C V2 / Rev2.0
+- MCU: ESP32-S3
+- Display: 360x360 round ST77916 QSPI LCD with PWM backlight
+- Touch: CST816 at I2C address `0x15`
+- Build env: `waveshare-esp32s3-touch-lcd-1-85c-v2`
+- Logical UI canvas: 300x300, centered in the physical panel with a safe
+  inset for the round bezel
 
-All four run the **same main.cpp / UI** — board-specific wiring, drivers and
-canvas→panel scaling are isolated in `src/hw/` + one header per board
-under `src/boards/`.
-
-| | [ESP32-S3-Touch-AMOLED-1.8](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.8) | [ESP32-S3-Touch-AMOLED-1.75C](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.75C) | [ESP32-C6-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-C6-Touch-AMOLED-2.16) | [ESP32-S3-Touch-AMOLED-2.16](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16) |
-| --- | --- | --- | --- | --- |
-| MCU | ESP32-S3R8 (8 MB OPI PSRAM, 8 MB flash) | same | ESP32-C6FH8 (160 MHz RISC-V single-core, 8 MB flash, **no PSRAM**) | ESP32-S3R8 (8 MB OPI PSRAM, 8 MB flash) |
-| Panel | 1.8" **rectangular** 368×448 AMOLED | 1.75" **round** 466×466 AMOLED | 2.16" **rounded-square** 480×480 AMOLED | 2.16" **rounded-square** 480×480 AMOLED (**rotated 90°**) |
-| Display driver | SH8601 (QSPI) | CO5300 (QSPI) | SH8601 (QSPI) | CO5300 (QSPI) |
-| Touch | FT3168 @ 0x38 | CST92xx @ 0x5A | CST9217 @ 0x5A | CST9217 @ 0x5A |
-| GPIO expander | TCA9554 (LCD/TP resets routed through it) | none — resets are direct GPIOs | none — resets are direct GPIOs | none — resets are direct GPIOs |
-| RTC | PCF85063 (I²C) | none — software clock synced from desktop | PCF85063 (I²C) | PCF85063 (I²C) |
-| IMU | QMI8658 | same | same | same |
-| PMU | AXP2101 | same | same | same |
-| Audio | ES8311 + amp + speaker | same | ES8311 + ES7210 (output + mic codec) | same |
-| Buttons | Key1 (GPIO0 BOOT) + AXP PEK | same (physical layout swapped; corrected in firmware) | three: PWR/IO10/BOOT; PWR is active-HIGH via MOSFET inverter + AXP PWRON | three: PWR/IO18/BOOT; PWR is active-HIGH via BSS138 inverter |
-| Canvas → panel | 184×224 canvas → **2× nearest-neighbor** → 368×448 | 184×224 canvas → **1.5× bilinear** → 276×336 centred in 466×466 (black border) | 184×224 canvas → **2× nearest-neighbor** → 368×448 centred at (56, 16) in 480×480 (56 px L/R / 16 px T/B black border) | 184×224 canvas → **2× nearest-neighbor** → 368×448 centred at (56, 16) in 480×480 (56 px L/R / 16 px T/B black border) |
-
-Internal canvas is **184×224** on all four. The 1.75C rounds the content
-inside its circular bezel; keeping the logical canvas identical means
-UI code, fonts and all buddy rendering are completely board-agnostic.
-
-The firmware targets ESP32-S3 and ESP32-C6 with Arduino framework 3.x via the
-[pioarduino](https://github.com/pioarduino/platform-espressif32) platform.
+The reset button is wired to the ESP32 reset line, so firmware cannot use it
+as an app control. The side slide switch is wired to GPIO6 and is treated as
+the secondary control when it is moved into its active position.
 
 ## Flashing
 
 Install
 [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/),
-then pick the env that matches your board:
+then build and upload:
 
 ```bash
-# 1.8" rectangular AMOLED (ESP32-S3)
-pio run -e waveshare-esp32s3-touch-amoled-1-8 -t upload
-
-# 1.75C round AMOLED (ESP32-S3)
-pio run -e waveshare-esp32s3-touch-amoled-1-75c -t upload
-
-# 2.16" rounded-square AMOLED (ESP32-C6)
-pio run -e waveshare-esp32c6-touch-amoled-2-16 -t upload
-
-# 2.16" rounded-square AMOLED (ESP32-S3)
-pio run -e waveshare-esp32s3-touch-amoled-2-16 -t upload
+pio run -e waveshare-esp32s3-touch-lcd-1-85c-v2 -t upload
 ```
 
-If you're starting from a previously-flashed device (e.g. the factory
-Xiaozhi firmware), wipe it first:
+If the board has unrelated firmware on it, erase it first:
 
 ```bash
-pio run -e <env> -t erase && pio run -e <env> -t upload
+pio run -e waveshare-esp32s3-touch-lcd-1-85c-v2 -t erase
+pio run -e waveshare-esp32s3-touch-lcd-1-85c-v2 -t upload
 ```
 
-LittleFS auto-formats on first boot if the partition isn't recognised.
-
-### Adding another board
-
-1. Add a new header at `src/boards/board_<name>.h` declaring all
-   `PIN_*`, `BOARD_HW_W/H`, `BOARD_SAFE_INSET`, and capability flags —
-   the existing headers cover ~16 flags between them
-   (`BOARD_HAS_PSRAM`, `BOARD_HAS_TCA9554`, `BOARD_HAS_PCF85063`,
-   `BOARD_HAS_AXP2101`, `BOARD_HAS_PA_CTRL`, `BOARD_HAS_KEY2`,
-   `BOARD_DISPLAY_CO5300`, `BOARD_DISPLAY_LETTERBOX`,
-   `BOARD_DISPLAY_OFFSET_X/Y`, `BOARD_DISPLAY_SCALE`,
-   `BOARD_DISPLAY_PUSH_STREAMED`, `BOARD_DISPLAY_SH8601_VENDOR_INIT`,
-   `BOARD_CO5300_COL_OFFSET`, `BOARD_CO5300_MADCTL`,
-   `BOARD_LCD_RST_VIA_PMU`, `BOARD_AXP_PWRON_4S_OFF`,
-   `BOARD_AXP_ENABLE_AUX_LDOS`, `BOARD_KEY1_ACTIVE_HIGH`,
-   `BOARD_BTN_THIRD`, `BOARD_BTN_SWAP_AB`, `BOARD_TOUCH_CST92XX`).
-   Pick the values that match your board.
-2. Add a `#elif defined(BOARD_<NAME>)` branch in `src/hw/pins.h`.
-3. Add a matching `[env:<name>]` block in `platformio.ini` with the
-   `-DBOARD_<NAME>` build flag.
-
-`main.cpp` and `buddies/` stay untouched.
-
-Once running you can also wipe everything from the device itself:
-**hold the A button (Key1 on 1.8/1.75C, PWR on the 2.16 boards) →
-settings → reset → factory reset → tap twice**.
+LittleFS auto-formats on first boot if the partition is empty or from a
+different firmware.
 
 ## Pairing
 
-To pair your device with Claude, first enable developer mode (**Help →
-Troubleshooting → Enable Developer Mode**). Then open the Hardware Buddy
-window in **Developer → Open Hardware Buddy…**, click **Connect**, and pick
-your device from the list (advertised as `Claude-XXXX`). macOS will prompt
-for Bluetooth permission on first connect; grant it.
+Enable developer mode in Claude Desktop with **Help -> Troubleshooting ->
+Enable Developer Mode**. Then open **Developer -> Open Hardware Buddy...**,
+click **Connect**, and select the device from the list. It advertises as
+`Claude-XXXX`.
 
-The device shows a 6-digit passkey on screen — type it on the desktop to
-complete LE Secure Connections bonding. Once paired, the bridge
-auto-reconnects whenever both sides are awake.
+The device shows a 6-digit passkey on screen. Type it into the desktop prompt
+to complete Bluetooth pairing. Once paired, the bridge reconnects whenever
+both sides are awake.
 
 ## Controls
 
-### ESP32-S3 boards (1.8 & 1.75C)
+| Control | Normal | Pet | Info | Approval |
+| --- | --- | --- | --- | --- |
+| BOOT tap | next screen | next screen | next screen | approve |
+| BOOT hold | open menu | open menu | open menu | open menu |
+| Side switch | scroll transcript | next page | next page | deny |
+| Touch | tap buddy / scroll area | tap top-right for page | tap top-right for page | tap upper half to approve, lower half to deny |
 
-The board has two physical keys. **Key1** is the BOOT button (acts as
-"A" in the table). **Key3** is the AXP power key — short-press is "B",
-long-press toggles screen off, very-long-press hardware-shuts-down.
+Swipe right-to-left advances through the flat page chain: Normal, Pet pages,
+then Info pages. Swipe left-to-right goes back through the same chain.
 
-|                          | Normal               | Pet         | Info        | Approval    |
-| ------------------------ | -------------------- | ----------- | ----------- | ----------- |
-| **Key1** (BOOT)          | next screen          | next screen | next screen | **approve** |
-| **Key3** (PWR, short)    | scroll transcript    | next page   | next page   | **deny**    |
-| **Hold Key1**            | menu                 | menu        | menu        | menu        |
-| **Key3** (PWR, ~1s long) | toggle screen off    |             |             |             |
-| **Key3** (PWR, ~6s)      | hard power off       |             |             |             |
-| **Shake**                | dizzy                |             |             | —           |
-| **Face-down**            | nap (energy refills) |             |             |             |
+For question prompts, the screen shows the prompt plus up to four large
+touch-selectable answers. Tap an answer to choose it. As a fallback, BOOT
+cycles the highlighted answer and the side switch confirms it.
 
-### ESP32-C6-Touch-AMOLED-2.16 controls
+The menu and settings panels also have touch controls at the bottom of the screen:
 
-The board has three physical keys:
-- **PWR** (middle) — primary action / confirm (= A button)
-- **IO10** (left) — secondary / back / scroll (= B button)
-- **BOOT** (right) — open menu shortcut
+- `^` selects the previous row
+- `v` selects the next row
+- `OK` confirms the highlighted row
 
-|                          | Normal               | Pet         | Info        | Approval    |
-| ------------------------ | -------------------- | ----------- | ----------- | ----------- |
-| **PWR** (middle)         | next screen          | next screen | next screen | **approve** |
-| **IO10** (left, short)   | scroll transcript    | next page   | next page   | **deny**    |
-| **Hold PWR**             | menu                 | menu        | menu        | menu        |
-| **BOOT** (right)         | open menu (shortcut) | open menu   | open menu   | open menu   |
-| **PWR held 4 s**         | power off (AXP cuts ALDO3; press again to wake) |             |             |             |
-| **Shake**                | dizzy                |             |             | —           |
-| **Face-down**            | nap (energy refills) |             |             |             |
+Settings rows are direct tap actions. The `rotate` row cycles the whole UI and
+touch mapping through `0`, `90`, `180`, and `270` degrees. The `widgets` row
+cycles home usage widgets through `off`, `simple`, and `fun`. `cancel` closes
+Settings without undoing any changes already made.
 
-### ESP32-S3-Touch-AMOLED-2.16 controls
+Because the side switch is latching, move it into the active position to send
+the secondary action, then move it back before using it again.
 
-The board has three physical keys:
-- **PWR** (middle) — primary action / confirm (= A button)
-- **IO18** (left) — secondary / back / scroll (= B button)
-- **BOOT** (right) — open menu shortcut
+The reset button performs a hardware reset only. It is not available to the
+firmware as a readable button.
 
-|                          | Normal               | Pet         | Info        | Approval    |
-| ------------------------ | -------------------- | ----------- | ----------- | ----------- |
-| **PWR** (middle)         | next screen          | next screen | next screen | **approve** |
-| **IO18** (left, short)   | scroll transcript    | next page   | next page   | **deny**    |
-| **Hold PWR**             | menu                 | menu        | menu        | menu        |
-| **BOOT** (right)         | open menu (shortcut) | open menu   | open menu   | open menu   |
-| **PWR held 4 s**         | power off (AXP cuts ALDO3; press again to wake) |             |             |             |
-| **Shake**                | dizzy                |             |             | —           |
-| **Face-down**            | nap (energy refills) |             |             |             |
+If Bluetooth pairing gets stuck, use **Settings -> reset -> pair reset** to
+clear the device's stored BLE bonds, then forget the old `Claude-XXXX` entry
+from the desktop Bluetooth settings before pairing again.
 
-### Touch (all boards)
+## Sleep And Wake
 
-Touch is supplemental — keys remain primary:
+- USB plugged in: screen stays awake
+- Battery + clock visible: screen sleeps after 5 minutes
+- Battery + other screens: screen sleeps after 30 seconds
+- Approval prompt visible: screen stays awake
 
-- **Swipe up / down** — cycle through all 9 pages (Normal → Pet ×2 → Info ×6). The A button (Key1 on S3 1.8/1.75C, PWR on the 2.16 boards) short-press remains a coarser 3-mode jumper.
-- **Swipe left / right** (clock home screen) — cycle ASCII species
-- **Approval screen** — tap upper half = approve, lower half = deny
-- **Menu / Settings / Reset** — tap a row to select+confirm in one go
-- **Info / Pet pages** — tap top-right corner to cycle pages
-- **Normal HUD** — tap buddy = heart, bottom 32 px = scroll transcript
+Any BOOT press, side-switch action, or screen tap wakes the display.
 
-### Sleep & wake
+## Per-State Animations
 
-- **USB plugged** — never auto-offs; the clock face stays visible
-- **Battery + clock visible** — auto-off after **5 minutes**
-- **Battery + other screens** — auto-off after **30 seconds**
-- **Approval prompt up** — never auto-offs
+| State | Trigger | Feel |
+| --- | --- | --- |
+| `sleep` | bridge not connected | eyes closed, slow breathing |
+| `idle` | connected, nothing urgent | blinking, looking around |
+| `busy` | sessions actively running | sweating, working |
+| `attention` | approval pending | alert, red top indicator |
+| `celebrate` | level up every 50K tokens | confetti, bouncing |
+| `dizzy` | motion event | spiral eyes, wobbling |
+| `heart` | approved quickly or tapped | floating hearts |
 
-Any key press or screen tap wakes the panel.
+Eighteen ASCII species are included. **Settings -> pet** cycles through
+them and persists the choice in NVS.
 
-## Notable differences from the M5StickC original
+## Home Usage Widgets
 
-- **Display layer** — Arduino_GFX + PSRAM Canvas (was M5.Lcd / TFT_eSprite)
-- **Attention indicator** — small red pill at top of screen
-  (M5 used a GPIO red LED; the AMOLED board has none)
-- **Landscape clock removed** — 368×448 is near-square; rotation pointless
-- **Battery current not exposed** — XPowersLib / AXP2101 only reports
-  voltage, %, and isCharging. The info-page "current" reads 0 mA
-- **Transcript supports CJK** — uses `chill7_h_cjk` font for the HUD lines
-  so Chinese / Japanese log entries render legibly
-- **Other UI strings stay ASCII** — non-ASCII bytes in `msg`, `promptTool`
-  and `promptHint` are replaced with random Matrix-rain symbols rather
-  than rendering as garbage glyphs
-- **ESP32-S3 2.16" rotation** — the Waveshare ESP32-S3-Touch-AMOLED-2.16 panel is physically mounted 90° rotated from its natural orientation; this is handled in firmware via MADCTL=0xA0 and is transparent to the UI code
+If the desktop bridge sends optional `usage` data, the home screen can show
+4-hour session and weekly usage. Simple mode shows compact percentage bars
+with reset countdowns. Fun mode shows small water bottles whose fill indicates
+usage remaining. Missing usage data hides the widgets.
 
-## Per-state animations
+## Pet Stats
 
-| State       | Trigger                     | Feel                                      |
-| ----------- | --------------------------- | ----------------------------------------- |
-| `sleep`     | bridge not connected        | eyes closed, slow breathing               |
-| `idle`      | connected, nothing urgent   | blinking, looking around                  |
-| `busy`      | sessions actively running   | sweating, working                         |
-| `attention` | approval pending            | alert, **red top-bar pulses**             |
-| `celebrate` | level up (every 50K tokens) | confetti, bouncing                        |
-| `dizzy`     | you shook the device        | spiral eyes, wobbling                     |
-| `heart`     | approved in under 5s        | floating hearts                           |
+- `level`: cumulative output tokens divided into 50K-token levels.
+- `fed`: progress through the current 50K-token level.
+- `mood`: based on median approval response speed; frequent denials reduce it.
+- `energy`: refills after a face-down nap, then drains by one tier every 2 hours.
+- `day`: bridge-provided `tokens_today`, output tokens since local midnight.
 
-Eighteen ASCII species, each with all seven animations. **Settings →
-ascii pet** cycles them; choice persists in NVS.
+## Custom GIF Characters
 
-## Custom GIF characters
-
-If you want a custom GIF character instead of an ASCII buddy, drag a
-character pack folder onto the drop target in the Hardware Buddy window.
-The app streams it over BLE and the device switches to GIF mode live.
-**Settings → reset → delete char** reverts to ASCII mode.
+If you want a custom GIF character instead of an ASCII buddy, drag a character
+pack folder onto the drop target in the Hardware Buddy window. The desktop app
+streams it over BLE and the device switches to GIF mode live. **Settings ->
+reset -> delete char** returns to ASCII mode.
 
 A character pack is a folder with `manifest.json` and 96 px-wide GIFs:
 
@@ -241,50 +168,33 @@ A character pack is a folder with `manifest.json` and 96 px-wide GIFs:
 }
 ```
 
-State values can be a single filename or an array. Arrays rotate
-loop-by-loop, useful for an idle activity carousel.
+State values can be a single filename or an array. GIFs should be 96 px wide;
+up to about 140 px tall keeps the character above the HUD. The whole pack must
+fit in the LittleFS partition.
 
-GIFs are 96 px wide; up to ~140 px tall keeps the character above the HUD.
-The whole folder must fit under 1.8 MB; `gifsicle --lossy=80 -O3 --colors 64`
-typically cuts 40–60 %.
+## Project Layout
 
-See `characters/bufo/` for a working example. If you're iterating on a
-character and would rather skip the BLE round-trip,
-`tools/flash_character.py characters/bufo` stages it into `data/` and runs
-`pio run -t uploadfs` directly over USB.
-
-## Project layout
-
-```
+```text
 src/
-  main.cpp           — loop, state machine, UI screens (board-agnostic)
-  buddy.{cpp,h}      — ASCII species dispatch + render helpers
-  buddies/           — one file per species, seven anim functions each
-  character.{cpp,h}  — GIF decode + render
-  ble_bridge.{cpp,h} — Nordic UART service, line-buffered TX/RX
-  data.h             — wire protocol, JSON parse, CJK matrixifier
-  xfer.h             — folder push receiver
-  stats.h            — NVS-backed stats, settings, owner, species choice
-  boards/            — one .h per supported board (pins + capability flags)
-  hw/                — board HAL (display, input, power, imu, rtc,
-                       audio, expander, border). pins.h dispatches on
-                       the BOARD_* build flag
+  main.cpp           -- loop, state machine, UI screens
+  buddy.{cpp,h}      -- ASCII species dispatch and render helpers
+  buddies/           -- one file per species
+  character.{cpp,h}  -- GIF decode and render
+  ble_bridge.{cpp,h} -- Nordic UART service and line-buffered TX/RX
+  data.h             -- wire protocol, JSON parse, CJK matrixifier
+  stats.h            -- NVS-backed settings and buddy stats
+  boards/            -- Waveshare 1.85C V2 pin and capability header
+  hw/                -- display, input, power, imu, rtc, audio, expander
 lib/
-  ES8311/            — vendored Espressif codec driver
-  Arduino_DriveBus/  — vendored FT3168 touch driver (1.8)
-  Adafruit_XCA9554/  — vendored TCA9554 expander driver (1.8)
-characters/          — example GIF character packs
-tools/               — generators and converters
-docs/superpowers/    — design specs + implementation plans
+  ES8311/            -- vendored Espressif codec driver
+  Adafruit_XCA9554/  -- vendored TCA9554 expander driver
+characters/          -- example GIF character packs
+tools/               -- generators and converters
+docs/                -- design notes and implementation plans
 ```
-
-CST92xx touch (1.75C, both 2.16 boards) and PCF85063 RTC (1.8, both
-2.16 boards) come in through `SensorLib` via `platformio.ini` lib_deps
-rather than being vendored.
 
 ## Availability
 
-The BLE API is only available when the Claude desktop apps are in
-developer mode (**Help → Troubleshooting → Enable Developer Mode**).
-It's intended for makers and developers and isn't an officially
+The BLE API is only available when the Claude desktop apps are in developer
+mode. It is intended for makers and developers and is not an officially
 supported product feature.

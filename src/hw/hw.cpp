@@ -17,8 +17,7 @@ void hwInit() {
 
   if (!hwExpanderInit())  die("expander");
 #if BOARD_LCD_RST_VIA_PMU
-  // 2.16 has no LCD_RST GPIO; the panel is reset by power-cycling
-  // AXP ALDO3. PMU must be initialised before the display.
+  // Optional PMU reset path retained for compile-time HAL compatibility.
   if (!hwPowerInit())     die("power");
   // ALDO3 power-cycle resets the panel (50 ms low between two highs).
   // s_pmu.enableALDO3() in powerInit left it enabled; toggle it here.
@@ -27,8 +26,7 @@ void hwInit() {
   hwPmuRef()->enableALDO3();
   delay(50);
 #endif
-  // Toggles PIN_TP_RESET on all boards; PIN_LCD_RESET only on non-PMU
-  // boards (gated inside the function via BOARD_LCD_RST_VIA_PMU).
+  // Toggles touch and display reset lines as defined by the board header.
   hwExpanderResetSequence();
   if (!hwDisplayInit())   die("display");
 #if !BOARD_LCD_RST_VIA_PMU

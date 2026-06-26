@@ -4,6 +4,10 @@
 #include <Arduino_GFX_Library.h>
 #include <string.h>
 
+#ifndef BOARD_BUDDY_HOME_SCALE
+#define BOARD_BUDDY_HOME_SCALE 2
+#endif
+
 // Mirrors PersonaState in main.cpp
 enum { B_SLEEP, B_IDLE, B_BUSY, B_ATTENTION, B_CELEBRATE, B_DIZZY, B_HEART };
 
@@ -155,16 +159,14 @@ static uint8_t lastDrawnSpecies = 0xFF;
 void buddyInvalidate() { lastDrawnState = 0xFF; }
 
 void buddySetPeek(bool peek) {
-  uint8_t s = peek ? 1 : 2;
+  uint8_t s = peek ? 1 : BOARD_BUDDY_HOME_SCALE;
   if (s == _scale) return;
   _scale = s;
   buddyInvalidate();
 }
 
-// One-shot render to an arbitrary Arduino_GFX surface (was M5.Lcd for
-// landscape clock; on AMOLED we keep the API for completeness even
-// though landscape clock is removed). Bypasses tick gating and the
-// canvas fillRect — caller owns clearing. Advances the frame counter
+// One-shot render to an arbitrary Arduino_GFX surface. Bypasses tick gating
+// and the canvas fillRect; caller owns clearing. Advances the frame counter
 // so animation runs even when buddyTick is bypassed.
 void buddyRenderTo(Arduino_GFX* override, uint8_t personaState) {
   uint8_t prevS = _scale; _scale = 1;
@@ -195,9 +197,9 @@ void buddyTick(uint8_t personaState) {
   lastDrawnState = personaState;
   lastDrawnSpecies = currentSpeciesIdx;
 
-  // Clear the whole render strip — at 2× the body reaches y≈126, at 1× ≈82.
-  tgt()->fillRect(0, 0, BUDDY_CANVAS_W,
-                  (BUDDY_Y_BASE + 5 * BUDDY_CHAR_H + 12) * _scale, BUDDY_BG);
+  int yBase = BUDDY_Y_BASE * _scale - (_scale - 1) * 14;
+  int clearH = yBase + (5 * BUDDY_CHAR_H + 12) * _scale;
+  tgt()->fillRect(0, 0, BUDDY_CANVAS_W, clearH, BUDDY_BG);
 
   const Species* sp = SPECIES_TABLE[currentSpeciesIdx];
   if (sp->states[personaState]) sp->states[personaState](tickCount);

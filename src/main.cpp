@@ -24,6 +24,14 @@
 // spr is a thin alias for hwCanvas() — keeps existing UI code unchanged
 #define spr (*hwCanvas())
 
+#ifndef BOARD_UI_TEXT_SCALE
+#define BOARD_UI_TEXT_SCALE 1
+#endif
+static constexpr int UI_SCALE = BOARD_UI_TEXT_SCALE;
+static constexpr int UI_CHAR_W = 6 * UI_SCALE;
+static constexpr int UI_CHAR_H = 8 * UI_SCALE;
+static constexpr int UI_LINE_H = 10 * UI_SCALE;
+
 // Advertise as "Claude-XXXX" (last two BT MAC bytes) so multiple sticks
 // in one room are distinguishable in the desktop picker. Name persists in
 // btName for the BLUETOOTH info page.
@@ -41,7 +49,7 @@ const int W = HW_W;
 const int H = HW_H;
 const int CX = W / 2;
 const int CY_BASE = 120;
-// LED replaced by AMOLED border-flash via hwBorderAlert() — no GPIO LED.
+// LED replaced by a small display alert via hwBorderAlert().
 
 // Colors used across multiple UI surfaces
 const uint16_t HOT   = 0xFA20;   // red-orange: warnings, impatience, deny
@@ -121,6 +129,7 @@ const uint32_t CLOCK_OFF_MS_BAT = 5UL  * 60UL * 1000UL; // 5min on battery, cloc
 bool     napping = false;
 uint32_t napStartMs = 0;
 uint32_t promptArrivedMs = 0;
+uint32_t questionArrivedMs = 0;
 
 // Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
 static bool isFaceDown() {
@@ -142,6 +151,8 @@ static void wake() {
   if (dimmed) { applyBrightness(); dimmed = false; }
 }
 bool     responseSent = false;
+bool     questionResponseSent = false;
+uint8_t  questionSel = 0;
 
 static void beep(uint16_t freq, uint16_t dur) {
   if (settings().sound) hwBeep(freq, dur);
@@ -167,11 +178,76 @@ static bool tappedFrom(int x, int y, int w, int h) {
          _tpStartX <  x + w && _tpStartY <  y + h;
 }
 
+struct CircleBand {
+  int x;
+  int w;
+};
+
+static int clampi(int v, int lo, int hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static CircleBand circleBand(int y, int h, int pad = 8) {
+  const int R = 142;
+  int y0 = y - CX;
+  int y1 = y + h - 1 - CX;
+  int dy = abs(y0) > abs(y1) ? abs(y0) : abs(y1);
+  int half = 0;
+  if (dy < R) half = (int)sqrtf((float)(R * R - dy * dy));
+  int x = CX - half + pad;
+  int w = half * 2 - pad * 2;
+  if (w < 0) w = 0;
+  if (x < 0) { w += x; x = 0; }
+  if (x + w > W) w = W - x;
+  return { x, w };
+}
+
+static int textWidthPx(const char* s, int sz = UI_SCALE) {
+  return (int)strlen(s) * 6 * sz;
+}
+
+static void drawBandText(int y, const char* s, uint16_t fg, uint16_t bg,
+                         int sz = UI_SCALE, int align = 0, int pad = 8) {
+  CircleBand b = circleBand(y, 8 * sz, pad);
+  int tw = textWidthPx(s, sz);
+  int x = b.x;
+  if (align == 0) x = b.x + (b.w - tw) / 2;
+  else if (align > 0) x = b.x + b.w - tw;
+  int right = b.x + b.w - tw;
+  if (right < b.x) right = b.x;
+  spr.setTextSize(sz);
+  spr.setTextColor(fg, bg);
+  spr.setCursor(clampi(x, b.x, right), y);
+  spr.print(s);
+}
+
+static void drawBandPrintf(int y, uint16_t fg, uint16_t bg,
+                           int sz, int align, int pad, const char* fmt, ...) {
+  char b[48];
+  va_list a;
+  va_start(a, fmt);
+  vsnprintf(b, sizeof(b), fmt, a);
+  va_end(a);
+  drawBandText(y, b, fg, bg, sz, align, pad);
+}
+
 // After a user interaction in clock mode (pet tap or species swipe), keep the
 // buddy awake for this long — otherwise the time-of-day logic snaps back to
 // P_SLEEP the instant the one-shot animation expires.
 static const uint32_t PLAYFUL_MS = 3UL * 60UL * 1000UL;
 static uint32_t _playfulUntil = 0;
+static uint32_t _petCursorUntil = 0;
+static int16_t  _petCursorX = CX;
+static int16_t  _petCursorY = 92;
+static constexpr uint32_t PET_CURSOR_MS = 520;
+
+static void triggerPetCursor(int16_t x, int16_t y) {
+  _petCursorX = x;
+  _petCursorY = y;
+  _petCursorUntil = millis() + PET_CURSOR_MS;
+}
+
+void triggerOneShot(PersonaState s, uint32_t durMs);
 
 static void sendCmd(const char* json) {
   Serial.println(json);
@@ -179,9 +255,56 @@ static void sendCmd(const char* json) {
   bleWrite((const uint8_t*)json, n);
   bleWrite((const uint8_t*)"\n", 1);
 }
-const uint8_t INFO_PAGES = 6;
-const uint8_t INFO_PG_BUTTONS = 1;
-const uint8_t INFO_PG_CREDITS = 5;
+
+static size_t jsonEscape(char* out, size_t n, const char* in) {
+  if (n == 0) return 0;
+  size_t j = 0;
+  for (size_t i = 0; in && in[i] && j + 1 < n; i++) {
+    char c = in[i];
+    if ((c == '"' || c == '\\') && j + 2 < n) {
+      out[j++] = '\\';
+      out[j++] = c;
+    } else if ((uint8_t)c >= 0x20) {
+      out[j++] = c;
+    }
+  }
+  out[j] = 0;
+  return j;
+}
+
+static void sendPermissionDecision(bool approve) {
+  char cmd[112];
+  snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"%s\"}",
+           tama.promptId, approve ? "once" : "deny");
+  sendCmd(cmd);
+  responseSent = true;
+  if (approve) {
+    uint32_t tookS = (millis() - promptArrivedMs) / 1000;
+    statsOnApproval(tookS);
+    beep(2400, 60);
+    if (tookS < 5) triggerOneShot(P_HEART, 2000);
+  } else {
+    statsOnDenial();
+    beep(600, 60);
+  }
+}
+
+static void sendQuestionAnswer(uint8_t idx) {
+  if (idx >= tama.questionCount) return;
+  char id[88], answer[140], cmd[280];
+  jsonEscape(id, sizeof(id), tama.questionId);
+  jsonEscape(answer, sizeof(answer), tama.questionOptions[idx]);
+  snprintf(cmd, sizeof(cmd),
+           "{\"cmd\":\"question\",\"id\":\"%s\",\"choice\":%u,\"answer\":\"%s\"}",
+           id, idx, answer);
+  sendCmd(cmd);
+  questionResponseSent = true;
+  beep(2400, 60);
+  triggerOneShot(P_HEART, 1200);
+}
+const uint8_t INFO_PAGES = 5;
+const uint8_t INFO_PG_BUTTONS = 0;
+const uint8_t INFO_PG_CREDITS = 4;
 
 void applyDisplayMode() {
   bool peek = displayMode != DISP_NORMAL;
@@ -195,9 +318,9 @@ void applyDisplayMode() {
   characterInvalidate();  // redraws character on next tick (text mode path)
 }
 
-// Swipe cycles through all 9 pages as a flat list:
-//   Normal → Pet 1/2 → Pet 2/2 → Info 1/6 → … → Info 6/6 → (wrap to Normal)
-// Key1 short-press keeps the coarser 3-mode cycle; these helpers are only
+// Swipe cycles through all 8 pages as a flat list:
+//   Normal → Pet 1/2 → Pet 2/2 → Info 1/5 → … → Info 5/5 → (wrap to Normal)
+// BOOT short-press keeps the coarser 3-mode cycle; these helpers are only
 // wired into the release-based gesture classifier below.
 // applyDisplayMode() fires on mode transitions and Pet sub-page (matches
 // existing BtnB behaviour). Info sub-page skips it because drawInfo() clears
@@ -231,13 +354,13 @@ const uint8_t MENU_N = 6;
 
 bool    settingsOpen = false;
 uint8_t settingsSel  = 0;
-const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "clock rot", "ascii pet", "reset", "back" };
+const char* settingsItems[] = { "rotate", "widgets", "bright", "sound", "pet", "hud", "alert", "bt", "reset", "cancel" };
 const uint8_t SETTINGS_N = 10;
 
 bool    resetOpen = false;
 uint8_t resetSel  = 0;
-const char* resetItems[] = { "delete char", "factory reset", "back" };
-const uint8_t RESET_N = 3;
+const char* resetItems[] = { "delete char", "pair reset", "factory", "back" };
+const uint8_t RESET_N = 4;
 static uint32_t resetConfirmUntil = 0;
 static uint8_t  resetConfirmIdx = 0xFF;
 
@@ -245,22 +368,30 @@ static void applySetting(uint8_t idx) {
   Settings& s = settings();
   switch (idx) {
     case 0:
+      s.uiRot = (s.uiRot + 1) & 0x03;
+      hwDisplaySetRotation(s.uiRot);
+      hwInputSetRotation(s.uiRot);
+      settingsSave();
+      spr.fillScreen(0x0000);
+      return;
+    case 1:
+      s.widgetMode = (s.widgetMode + 1) % 3;
+      break;
+    case 2:
       brightLevel = (brightLevel + 1) % 5;
       applyBrightness();
       return;
-    case 1: s.sound = !s.sound; break;
-    case 2:
+    case 3: s.sound = !s.sound; break;
+    case 4: nextPet(); return;
+    case 5: s.hud = !s.hud; break;
+    case 6: s.led = !s.led; break;
+    case 7:
       // BT toggle is a stored preference only — BLE stays live. Turning
       // BLE off cleanly would require tearing down the BLE stack which
       // the Arduino BLE library doesn't do reliably. If we need a
       // hard-off someday, stop advertising via BLEDevice::getAdvertising().
       s.bt = !s.bt;
       break;
-    case 3: s.wifi = !s.wifi; break;   // stored only — no WiFi stack linked
-    case 4: s.led = !s.led; break;
-    case 5: s.hud = !s.hud; break;
-    case 6: s.clockRot = (s.clockRot + 1) % 3; break;
-    case 7: nextPet(); return;
     case 8: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
     case 9: settingsOpen = false; characterInvalidate(); return;
   }
@@ -273,7 +404,7 @@ static void applyReset(uint8_t idx) {
   uint32_t now = millis();
   bool armed = (resetConfirmIdx == idx) && (int32_t)(now - resetConfirmUntil) < 0;
 
-  if (idx == 2) { resetOpen = false; return; }
+  if (idx == 3) { resetOpen = false; return; }
 
   if (!armed) {
     resetConfirmIdx = idx;
@@ -308,6 +439,11 @@ static void applyReset(uint8_t idx) {
       }
       d.close();
     }
+  } else if (idx == 1) {
+    // pair reset: clear stored BLE bonds only, then reboot so advertising
+    // restarts from a clean security state. Desktop/macOS may also need the
+    // old Claude-XXXX device forgotten from Bluetooth settings.
+    bleClearBonds();
   } else {
     // factory reset: NVS namespace wipe + filesystem format + BLE bonds.
     // Clears stats, owner, petname, species, settings, GIF characters,
@@ -322,76 +458,93 @@ static void applyReset(uint8_t idx) {
   ESP.restart();
 }
 
-// Footer hint row inside a menu panel: "<downLbl> ↓  <rightLbl> →" with
-// pixel triangles. Panels add MENU_HINT_H to height and call this at bottom.
-const int MENU_HINT_H = 14;
+// Footer hint row inside a menu panel. Panels add MENU_HINT_H to height
+// and call this at bottom.
+const int MENU_ROW_H  = 9 * UI_SCALE;
+const int MENU_HINT_H = 21 * UI_SCALE;
+const int MENU_PAD_X  = 7 * UI_SCALE;
+
+static void menuLayout(int n, int& mx, int& my, int& mw, int& mh) {
+  mw = 96 * UI_SCALE;
+  mh = 14 * UI_SCALE + n * MENU_ROW_H + MENU_HINT_H;
+  mx = (W - mw) / 2;
+  my = (H - mh) / 2;
+}
+
 static void drawMenuHints(const Palette& p, int mx, int mw, int hy,
                           const char* downLbl = "A", const char* rightLbl = "B") {
-  spr.drawFastHLine(mx + 6, hy - 4, mw - 12, p.textDim);
-  spr.setTextColor(p.textDim, PANEL);
-  // 6px/glyph at size 1; triangle goes 4px after the label ends
-  int x = mx + 8;
-  spr.setCursor(x, hy); spr.print(downLbl);
-  x += strlen(downLbl) * 6 + 4;
-  spr.fillTriangle(x, hy + 1, x + 6, hy + 1, x + 3, hy + 6, p.textDim);
-  x = mx + mw / 2 + 4;
-  spr.setCursor(x, hy); spr.print(rightLbl);
-  x += strlen(rightLbl) * 6 + 4;
-  spr.fillTriangle(x, hy, x, hy + 6, x + 5, hy + 3, p.textDim);
+  spr.drawFastHLine(mx + MENU_PAD_X, hy - 4 * UI_SCALE, mw - MENU_PAD_X * 2, p.textDim);
+  spr.setTextSize(UI_SCALE);
+  const char* labels[3] = { "^", "v", rightLbl };
+  int gap = 2 * UI_SCALE;
+  int bw = (mw - 2 * gap - MENU_PAD_X * 2) / 3;
+  int bh = 16 * UI_SCALE;
+  int x = mx + MENU_PAD_X;
+  for (int i = 0; i < 3; i++) {
+    spr.drawRoundRect(x, hy, bw, bh, 2 * UI_SCALE, p.textDim);
+    spr.setTextColor(i == 2 ? p.text : p.textDim, PANEL);
+    int tw = strlen(labels[i]) * UI_CHAR_W;
+    spr.setCursor(x + (bw - tw) / 2, hy + 4 * UI_SCALE);
+    spr.print(labels[i]);
+    x += bw + gap;
+  }
 }
 
 static void drawSettings() {
   const Palette& p = characterPalette();
-  int mw = 118, mh = 16 + SETTINGS_N * 14 + MENU_HINT_H;
-  int mx = (W - mw) / 2, my = (H - mh) / 2;
-  spr.fillRoundRect(mx, my, mw, mh, 4, PANEL);
-  spr.drawRoundRect(mx, my, mw, mh, 4, p.textDim);
-  spr.setTextSize(1);
+  int mx, my, mw, mh;
+  menuLayout(SETTINGS_N, mx, my, mw, mh);
+  spr.fillRoundRect(mx, my, mw, mh, 3 * UI_SCALE, PANEL);
+  spr.drawRoundRect(mx, my, mw, mh, 3 * UI_SCALE, p.textDim);
+  spr.setTextSize(UI_SCALE);
   Settings& s = settings();
-  bool vals[] = { s.sound, s.bt, s.wifi, s.led, s.hud };
   for (int i = 0; i < SETTINGS_N; i++) {
     bool sel = (i == settingsSel);
     spr.setTextColor(sel ? p.text : p.textDim, PANEL);
-    spr.setCursor(mx + 6, my + 8 + i * 14);
+    spr.setCursor(mx + MENU_PAD_X, my + 7 * UI_SCALE + i * MENU_ROW_H);
     spr.print(sel ? "> " : "  ");
     spr.print(settingsItems[i]);
-    spr.setCursor(mx + mw - 36, my + 8 + i * 14);
+    spr.setCursor(mx + mw - 32 * UI_SCALE, my + 7 * UI_SCALE + i * MENU_ROW_H);
     spr.setTextColor(p.textDim, PANEL);
     if (i == 0) {
+      static const char* const ROT[] = { "0", "90", "180", "270" };
+      spr.print(ROT[s.uiRot & 0x03]);
+    } else if (i == 1) {
+      static const char* const WM[] = { "off", "simp", "fun" };
+      spr.print(WM[s.widgetMode]);
+    } else if (i == 2) {
       spr.printf("%u/4", brightLevel);
-    } else if (i >= 1 && i <= 5) {
-      spr.setTextColor(vals[i-1] ? GREEN : p.textDim, PANEL);
-      spr.print(vals[i-1] ? " on" : "off");
-    } else if (i == 6) {
-      static const char* const RN[] = { "auto", "port", "land" };
-      spr.print(RN[s.clockRot]);
-    } else if (i == 7) {
+    } else if (i == 3 || i == 5 || i == 6 || i == 7) {
+      bool on = (i == 3) ? s.sound : (i == 5) ? s.hud : (i == 6) ? s.led : s.bt;
+      spr.setTextColor(on ? GREEN : p.textDim, PANEL);
+      spr.print(on ? " on" : "off");
+    } else if (i == 4) {
       uint8_t total = buddySpeciesCount() + (gifAvailable ? 1 : 0);
       uint8_t pos   = buddyMode ? buddySpeciesIdx() + 1 : total;
       spr.printf("%u/%u", pos, total);
     }
   }
-  drawMenuHints(p, mx, mw, my + mh - 12, "Next", "Change");
+  drawMenuHints(p, mx, mw, my + mh - 18 * UI_SCALE, "Next", "OK");
 }
 
 static void drawReset() {
   const Palette& p = characterPalette();
-  int mw = 118, mh = 16 + RESET_N * 14 + MENU_HINT_H;
-  int mx = (W - mw) / 2, my = (H - mh) / 2;
-  spr.fillRoundRect(mx, my, mw, mh, 4, PANEL);
-  spr.drawRoundRect(mx, my, mw, mh, 4, HOT);
-  spr.setTextSize(1);
+  int mx, my, mw, mh;
+  menuLayout(RESET_N, mx, my, mw, mh);
+  spr.fillRoundRect(mx, my, mw, mh, 3 * UI_SCALE, PANEL);
+  spr.drawRoundRect(mx, my, mw, mh, 3 * UI_SCALE, HOT);
+  spr.setTextSize(UI_SCALE);
   for (int i = 0; i < RESET_N; i++) {
     bool sel = (i == resetSel);
     spr.setTextColor(sel ? p.text : p.textDim, PANEL);
-    spr.setCursor(mx + 6, my + 8 + i * 14);
+    spr.setCursor(mx + MENU_PAD_X, my + 7 * UI_SCALE + i * MENU_ROW_H);
     spr.print(sel ? "> " : "  ");
     bool armed = (i == resetConfirmIdx) &&
                  (int32_t)(millis() - resetConfirmUntil) < 0;
     if (armed) spr.setTextColor(HOT, PANEL);
     spr.print(armed ? "really?" : resetItems[i]);
   }
-  drawMenuHints(p, mx, mw, my + mh - 12);
+  drawMenuHints(p, mx, mw, my + mh - 18 * UI_SCALE, "Next", "OK");
 }
 
 void menuConfirm() {
@@ -413,24 +566,23 @@ void menuConfirm() {
 
 void drawMenu() {
   const Palette& p = characterPalette();
-  int mw = 118, mh = 16 + MENU_N * 14 + MENU_HINT_H;
-  int mx = (W - mw) / 2, my = (H - mh) / 2;
-  spr.fillRoundRect(mx, my, mw, mh, 4, PANEL);
-  spr.drawRoundRect(mx, my, mw, mh, 4, p.textDim);
-  spr.setTextSize(1);
+  int mx, my, mw, mh;
+  menuLayout(MENU_N, mx, my, mw, mh);
+  spr.fillRoundRect(mx, my, mw, mh, 3 * UI_SCALE, PANEL);
+  spr.drawRoundRect(mx, my, mw, mh, 3 * UI_SCALE, p.textDim);
+  spr.setTextSize(UI_SCALE);
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuSel);
     spr.setTextColor(sel ? p.text : p.textDim, PANEL);
-    spr.setCursor(mx + 6, my + 8 + i * 14);
+    spr.setCursor(mx + MENU_PAD_X, my + 7 * UI_SCALE + i * MENU_ROW_H);
     spr.print(sel ? "> " : "  ");
     spr.print(menuItems[i]);
     if (i == 4) spr.print(dataDemo() ? "  on" : "  off");
   }
-  drawMenuHints(p, mx, mw, my + mh - 12);
+  drawMenuHints(p, mx, mw, my + mh - 18 * UI_SCALE, "Next", "OK");
 }
 
-// Portrait-only clock on AMOLED port (landscape removed — 368×448 is
-// near-square; rotating doesn't change the layout meaningfully).
+// Portrait-only clock on the round LCD target.
 static HwTime  _clkTm;
 uint32_t       _clkLastRead = 0;   // zeroed by data.h on time-sync
 static bool    _onUsb       = false;
@@ -471,12 +623,13 @@ static void drawClock() {
   // horizontal room for HH:MM:SS at size 3 (8 chars × 18 = 144 px).
   spr.fillRect(0, 140, W, H - 140, p.bg);
   drawCenteredText(hms, CX, 160, 3, p.text,    p.bg);
-  drawCenteredText(dl,  CX, SAFE_B - 21, 1, p.textDim, p.bg);
+  drawBandText(SAFE_B - 26, dl, p.textDim, p.bg, 1, 0, 18);
   spr.setTextSize(1);
 }
 
 PersonaState derive(const TamaState& s) {
   if (!s.connected)            return P_IDLE;
+  if (s.promptId[0] || s.questionId[0]) return P_ATTENTION;
   if (s.sessionsWaiting > 0)   return P_ATTENTION;
   if (s.recentlyCompleted)     return P_CELEBRATE;
   if (s.sessionsRunning >= 3)  return P_BUSY;
@@ -500,185 +653,139 @@ bool checkShake() {
 
 
 
-// Persistent screen-level title row ("INFO  n/3") matching the PET header,
-// then a per-page section label below it. The fixed title is the cue that
-// B cycles pages here just like it does on PET.
-static void _infoHeader(const Palette& p, int& y, const char* section, uint8_t page) {
+static void drawPageHeader(const Palette& p, int y, const char* title,
+                           uint8_t page, uint8_t pages) {
+  spr.setTextSize(UI_SCALE);
+  CircleBand b = circleBand(y, UI_CHAR_H, 16);
   spr.setTextColor(p.text, p.bg);
-  spr.setCursor(SAFE_L, y); spr.print("Info");
+  spr.setCursor(b.x, y);
+  spr.print(title);
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(SAFE_R - 24, y); spr.printf("%u/%u", page + 1, INFO_PAGES);
-  y += 12;
-  spr.setTextColor(p.body, p.bg);
-  spr.setCursor(SAFE_L, y); spr.print(section);
-  y += 12;
+  spr.setCursor(b.x + b.w - 24 * UI_SCALE, y);
+  spr.printf("%u/%u", page + 1, pages);
+}
+
+// Persistent screen-level title row ("INFO  n/3") matching the PET header,
+// then a per-page section label below it.
+static void _infoHeader(const Palette& p, int& y, const char* section, uint8_t page) {
+  drawPageHeader(p, y, "Info", page, INFO_PAGES);
+  y += 19;
+  drawBandText(y, section, p.body, p.bg, UI_SCALE, 0, 20);
+  y += 22;
 }
 
 void drawPasskey() {
   const Palette& p = characterPalette();
   spr.fillScreen(p.bg);
-  spr.setTextSize(1);
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(SAFE_L, 56);  spr.print("BLUETOOTH PAIRING");
-  spr.setCursor(SAFE_L, SAFE_B - 32); spr.print("enter on desktop:");
+  drawBandText(58, "PAIRING", p.textDim, p.bg, UI_SCALE, 0, 20);
+  drawBandText(SAFE_B - 34, "enter on desktop:", p.textDim, p.bg, UI_SCALE, 0, 16);
   spr.setTextSize(3);
   spr.setTextColor(p.text, p.bg);
   char b[8]; snprintf(b, sizeof(b), "%06lu", (unsigned long)blePasskey());
-  spr.setCursor((W - 18 * 6) / 2, 110);
+  spr.setCursor((W - 18 * 6) / 2, H / 2 - 12);
   spr.print(b);
 }
 
 void drawInfo() {
   const Palette& p = characterPalette();
-  const int TOP = 70;
+  const int TOP = 66;
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
-  spr.setTextSize(1);
+  spr.setTextSize(UI_SCALE);
   int y = TOP + 2;
-  auto ln = [&](const char* fmt, ...) {
-    char b[32]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof(b), fmt, a); va_end(a);
-    spr.setCursor(SAFE_L, y); spr.print(b); y += 8;
+  auto ln = [&](uint16_t c, const char* fmt, ...) {
+    char b[40]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof(b), fmt, a); va_end(a);
+    CircleBand cb = circleBand(y, UI_CHAR_H, 12);
+    spr.setTextColor(c, p.bg);
+    spr.setCursor(cb.x, y);
+    spr.print(b);
+    y += 18;
   };
+  auto gap = [&]() { y += 4; };
 
   if (infoPage == 0) {
-    _infoHeader(p, y, "ABOUT", infoPage);
-    spr.setTextColor(p.textDim, p.bg);
-    ln("I watch your Claude");
-    ln("desktop sessions.");
-    y += 6;
-    ln("I sleep when nothing's");
-    ln("happening, wake when");
-    ln("you start working,");
-    ln("get impatient when");
-    ln("approvals pile up.");
-    y += 6;
-    spr.setTextColor(p.text, p.bg);
-    ln("Press A on a prompt");
-    ln("to approve from here.");
-    y += 6;
-    spr.setTextColor(p.textDim, p.bg);
-    ln("18 species. Settings");
-    ln("> ascii pet to cycle.");
+    _infoHeader(p, y, "BUTTONS", infoPage);
+    ln(p.text,    "BOOT tap");
+    ln(p.textDim, "next / approve");
+    gap();
+    ln(p.text,    "BOOT hold");
+    ln(p.textDim, "open menu");
+    gap();
+    ln(p.text,    "Side switch");
+    ln(p.textDim, "page / deny / OK");
+    gap();
+    ln(p.textDim, "touch rows + ^ v OK");
 
   } else if (infoPage == 1) {
-    _infoHeader(p, y, "BUTTONS", infoPage);
-    spr.setTextColor(p.text, p.bg);    ln("A   front");
-    spr.setTextColor(p.textDim, p.bg); ln("    next screen");
-    ln("    approve prompt"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("B   right side");
-    spr.setTextColor(p.textDim, p.bg); ln("    next page");
-    ln("    deny prompt"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("hold A");
-    spr.setTextColor(p.textDim, p.bg); ln("    menu"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("Power  left side");
-    spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
-    ln("    hold 6s = off");
+    _infoHeader(p, y, "CLAUDE", infoPage);
+    ln(p.textDim, "sessions %u", tama.sessionsTotal);
+    ln(p.textDim, "running  %u", tama.sessionsRunning);
+    ln(p.textDim, "waiting  %u", tama.sessionsWaiting);
+    gap();
+    ln(p.text,    "LINK");
+    ln(p.textDim, "via %s", dataScenarioName());
+    ln(p.textDim, "ble %s", !bleConnected() ? "-" : bleSecure() ? "secure" : "open");
+    uint32_t age = (millis() - tama.lastUpdated) / 1000;
+    ln(p.textDim, "age %lus", (unsigned long)age);
+    ln(p.textDim, "state %s", stateNames[activeState]);
 
   } else if (infoPage == 2) {
-    _infoHeader(p, y, "CLAUDE", infoPage);
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  sessions  %u", tama.sessionsTotal);
-    ln("  running   %u", tama.sessionsRunning);
-    ln("  waiting   %u", tama.sessionsWaiting);
-    y += 8;
-    spr.setTextColor(p.text, p.bg);
-    ln("LINK");
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  via       %s", dataScenarioName());
-    ln("  ble       %s", !bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN");
-    uint32_t age = (millis() - tama.lastUpdated) / 1000;
-    ln("  last msg  %lus", (unsigned long)age);
-    ln("  state     %s", stateNames[activeState]);
-
-  } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
 
     HwBattery hb = hwBattery();
     int vBat_mV  = hb.mV;
-    int iBat_mA  = hb.mA;       // always 0 on AXP2101 (current not exposed)
     int vBus_mV  = hb.usbPresent ? 5000 : 0;
     int pct      = hb.pct;
     bool usb     = hb.usbPresent;
     bool charging = hb.charging;
     bool full    = usb && vBat_mV > 4100 && !charging;
 
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextSize(2);
-    spr.setCursor(SAFE_L, y);
-    spr.printf("%d%%", pct);
-    spr.setTextSize(1);
-    spr.setTextColor(full ? GREEN : (charging ? HOT : p.textDim), p.bg);
-    spr.setCursor(60, y + 4);
-    spr.print(full ? "full" : (charging ? "charging" : (usb ? "usb" : "battery")));
-    y += 20;
-
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  battery  %d.%02dV", vBat_mV/1000, (vBat_mV%1000)/10);
-    ln("  current  %+dmA", iBat_mA);
-    if (usb) ln("  usb in   %d.%02dV", vBus_mV/1000, (vBus_mV%1000)/10);
-    y += 8;
-
-    spr.setTextColor(p.text, p.bg);
-    ln("SYSTEM");
-    spr.setTextColor(p.textDim, p.bg);
-    if (ownerName()[0]) ln("  owner    %s", ownerName());
+    drawBandPrintf(y, p.text, p.bg, UI_SCALE, 0, 16, "%d%% %s", pct,
+                   full ? "full" : (charging ? "charging" : (usb ? "usb" : "battery")));
+    y += 22;
+    ln(p.textDim, "bat %d.%02dV", vBat_mV/1000, (vBat_mV%1000)/10);
+    if (usb) ln(p.textDim, "usb %d.%02dV", vBus_mV/1000, (vBus_mV%1000)/10);
+    else     ln(p.textDim, "usb none");
+    gap();
     uint32_t up = millis() / 1000;
-    ln("  uptime   %luh %02lum", up / 3600, (up / 60) % 60);
-    ln("  heap     %uKB", ESP.getFreeHeap() / 1024);
-    ln("  bright   %u/4", brightLevel);
-    ln("  bt       %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
-    ln("  temp     %dC", (int)hwBattery().tempC);
+    ln(p.textDim, "up %luh %02lum", up / 3600, (up / 60) % 60);
+    ln(p.textDim, "heap %uKB", ESP.getFreeHeap() / 1024);
+    ln(p.textDim, "bright %u/4", brightLevel);
+    ln(p.textDim, "bt %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
 
-  } else if (infoPage == 4) {
+  } else if (infoPage == 3) {
     _infoHeader(p, y, "BLUETOOTH", infoPage);
     bool linked = settings().bt && dataBtActive();
 
-    spr.setTextColor(linked ? GREEN : (settings().bt ? HOT : p.textDim), p.bg);
-    ln("%s", linked ? "linked" : (settings().bt ? "discover" : "off"));
-    y += 4;
-
-    spr.setTextColor(p.text, p.bg);
-    ln("%s", btName);
-    spr.setTextColor(p.textDim, p.bg);
+    ln(linked ? GREEN : (settings().bt ? HOT : p.textDim),
+       "%s", linked ? "linked" : (settings().bt ? "discover" : "off"));
+    gap();
+    ln(p.text, "%s", btName);
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_BT);
-    ln("%02X:%02X:%02X:%02X:%02X:%02X",
-       mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
-    y += 4;
+    ln(p.textDim, "%02X:%02X:%02X", mac[0],mac[1],mac[2]);
+    ln(p.textDim, "%02X:%02X:%02X", mac[3],mac[4],mac[5]);
+    gap();
 
     if (linked) {
       uint32_t age = (millis() - tama.lastUpdated) / 1000;
-      ln("last msg  %lus", (unsigned long)age);
+      ln(p.textDim, "last msg %lus", (unsigned long)age);
     } else if (settings().bt) {
-      spr.setTextColor(p.text, p.bg);
-      ln("TO PAIR");
-      spr.setTextColor(p.textDim, p.bg);
-      ln("Open Claude desktop");
-      ln("> Developer");
-      ln("> Hardware Buddy");
-      y += 4;
-      ln("auto-connects via BLE");
+      ln(p.text, "TO PAIR");
+      ln(p.textDim, "Claude desktop");
+      ln(p.textDim, "Developer");
+      ln(p.textDim, "Hardware Buddy");
     }
 
   } else {
     _infoHeader(p, y, "CREDITS", infoPage);
-    spr.setTextColor(p.textDim, p.bg);
-    ln("made by");
-    y += 4;
-    spr.setTextColor(p.text, p.bg);
-    ln("Felix Rieseberg");
-    y += 12;
-    spr.setTextColor(p.textDim, p.bg);
-    ln("hardware adaptation");
-    y += 4;
-    spr.setTextColor(p.text, p.bg);
-    ln("yadong");
-    y += 12;
-    spr.setTextColor(p.textDim, p.bg);
-    ln("hardware");
-    y += 4;
-    spr.setTextColor(p.text, p.bg);
-    ln(BOARD_MODEL_LINE1);
-    ln(BOARD_MODEL_LINE2);
+    ln(p.textDim, "originally by");
+    ln(p.text,    "Felix Rieseberg");
+    gap();
+    ln(p.textDim, "forked ESP32");
+    ln(p.text,    "yadong");
+    gap();
+    ln(p.textDim, "refined 1.85C");
+    ln(p.text,    "HazzJC");
   }
 }
 
@@ -726,148 +833,242 @@ static uint8_t wrapInto(const char* in, char out[][48], uint8_t maxRows, uint8_t
   return row;
 }
 
-static void drawApproval() {
+static void fitLabel(char* out, size_t n, const char* prefix, const char* s, int maxChars) {
+  if (n == 0) return;
+  if (maxChars < 1) maxChars = 1;
+  if (maxChars > (int)n - 1) maxChars = (int)n - 1;
+  int pre = strlen(prefix);
+  int room = maxChars - pre;
+  if (room < 1) room = 1;
+  snprintf(out, n, "%s%.*s", prefix, room, s ? s : "");
+  if ((int)strlen(out) >= maxChars && maxChars > 1) {
+    out[maxChars - 1] = '.';
+    out[maxChars] = 0;
+  }
+}
+
+static bool questionRowRect(uint8_t idx, int& x, int& y, int& w, int& h) {
+  if (idx >= tama.questionCount || idx >= 4) return false;
+  y = 156 + idx * 28;
+  h = 24;
+  CircleBand b = circleBand(y, h, 14);
+  x = b.x;
+  w = b.w;
+  return w > 20;
+}
+
+static void drawQuestion() {
   const Palette& p = characterPalette();
-  const int AREA = 78;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
-  spr.drawFastHLine(0, H - AREA, W, p.textDim);
+  const int TOP = 64;
+  spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  drawPageHeader(p, 70, "Question", questionSel, tama.questionCount ? tama.questionCount : 1);
 
-  spr.setTextSize(1);
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(SAFE_L, H - AREA + 4);
-  uint32_t waited = (millis() - promptArrivedMs) / 1000;
-  if (waited >= 10) spr.setTextColor(HOT, p.bg);
-  spr.printf("approve? %lus", (unsigned long)waited);
-
-  // Size 2 only if it fits one line (~10 chars at 12px on 135px screen)
-  int toolLen = strlen(tama.promptTool);
-  spr.setTextColor(p.text, p.bg);
-  spr.setTextSize(toolLen <= 10 ? 2 : 1);
-  spr.setCursor(SAFE_L, H - AREA + (toolLen <= 10 ? 14 : 18));
-  spr.print(tama.promptTool);
-  spr.setTextSize(1);
-
-  // Hint wraps at ~21 chars to two lines under the tool name
-  spr.setTextColor(p.textDim, p.bg);
-  int hlen = strlen(tama.promptHint);
-  spr.setCursor(SAFE_L, H - AREA + 34);
-  spr.printf("%.21s", tama.promptHint);
-  if (hlen > 21) {
-    spr.setCursor(SAFE_L, H - AREA + 42);
-    spr.printf("%.21s", tama.promptHint + 21);
+  char lines[3][48];
+  uint8_t n = wrapInto(tama.questionText, lines, 3, 18);
+  int y = 94;
+  for (uint8_t i = 0; i < n; i++) {
+    drawBandText(y + i * 18, lines[i], i == 0 ? p.text : p.textDim, p.bg, UI_SCALE, 0, 16);
   }
 
+  for (uint8_t i = 0; i < tama.questionCount && i < 4; i++) {
+    int rx, ry, rw, rh;
+    if (!questionRowRect(i, rx, ry, rw, rh)) continue;
+    bool sel = (i == questionSel);
+    uint16_t fill = sel ? p.body : PANEL;
+    uint16_t ink  = sel ? p.bg : p.text;
+    spr.fillRoundRect(rx, ry, rw, rh, 3 * UI_SCALE, fill);
+    spr.drawRoundRect(rx, ry, rw, rh, 3 * UI_SCALE, sel ? p.text : p.textDim);
+    spr.setTextSize(UI_SCALE);
+    spr.setTextColor(ink, fill);
+    char prefix[4];
+    snprintf(prefix, sizeof(prefix), "%u ", i + 1);
+    char label[36];
+    int maxChars = (rw - 10 * UI_SCALE) / UI_CHAR_W;
+    fitLabel(label, sizeof(label), prefix, tama.questionOptions[i], maxChars);
+    spr.setCursor(rx + 5 * UI_SCALE, ry + 4 * UI_SCALE);
+    spr.print(label);
+  }
+}
+
+static void drawApproval() {
+  const Palette& p = characterPalette();
+  const int AREA = 112;
+  const int TOP = H - AREA;
+  spr.fillRect(0, H - AREA, W, AREA, p.bg);
+  spr.drawFastHLine(circleBand(TOP, 1, 12).x, TOP, circleBand(TOP, 1, 12).w, p.textDim);
+
+  spr.setTextSize(UI_SCALE);
+  uint32_t waited = (millis() - promptArrivedMs) / 1000;
+  drawBandPrintf(TOP + 9, waited >= 10 ? HOT : p.textDim, p.bg,
+                 UI_SCALE, 0, 14, "approve? %lus", (unsigned long)waited);
+
+  int toolLen = strlen(tama.promptTool);
+  drawBandText(TOP + 31, tama.promptTool, p.text, p.bg, toolLen <= 10 ? 2 : UI_SCALE, 0, 14);
+  spr.setTextSize(UI_SCALE);
+
+  int hlen = strlen(tama.promptHint);
+  char hint[18];
+  snprintf(hint, sizeof(hint), hlen > 15 ? "%.14s." : "%.15s", tama.promptHint);
+  drawBandText(TOP + 57, hint, p.textDim, p.bg, UI_SCALE, 0, 14);
+
   if (responseSent) {
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(SAFE_L, SAFE_B - 12);
-    spr.print("sent...");
+    drawBandText(SAFE_B - 21, "sent...", p.textDim, p.bg, UI_SCALE, 0, 18);
   } else {
+    CircleBand b = circleBand(SAFE_B - 22, UI_CHAR_H, 18);
     spr.setTextColor(GREEN, p.bg);
-    spr.setCursor(SAFE_L, SAFE_B - 12);
-    spr.print("A: approve");
+    spr.setCursor(b.x, SAFE_B - 22);
+    spr.print("BOOT/tap");
     spr.setTextColor(HOT, p.bg);
-    spr.setCursor(SAFE_R - 48, SAFE_B - 12);
-    spr.print("B: deny");
+    spr.setCursor(b.x + b.w - textWidthPx("slide no"), SAFE_B - 22);
+    spr.print("slide no");
   }
 }
 
 static void tinyHeart(int x, int y, bool filled, uint16_t col) {
+  int r = 2 * UI_SCALE;
   if (filled) {
-    spr.fillCircle(x - 2, y, 2, col);
-    spr.fillCircle(x + 2, y, 2, col);
-    spr.fillTriangle(x - 4, y + 1, x + 4, y + 1, x, y + 5, col);
+    spr.fillCircle(x - r, y, r, col);
+    spr.fillCircle(x + r, y, r, col);
+    spr.fillTriangle(x - 2 * r, y + UI_SCALE, x + 2 * r, y + UI_SCALE, x, y + 5 * UI_SCALE, col);
   } else {
-    spr.drawCircle(x - 2, y, 2, col);
-    spr.drawCircle(x + 2, y, 2, col);
-    spr.drawLine(x - 4, y + 1, x, y + 5, col);
-    spr.drawLine(x + 4, y + 1, x, y + 5, col);
+    spr.drawCircle(x - r, y, r, col);
+    spr.drawCircle(x + r, y, r, col);
+    spr.drawLine(x - 2 * r, y + UI_SCALE, x, y + 5 * UI_SCALE, col);
+    spr.drawLine(x + 2 * r, y + UI_SCALE, x, y + 5 * UI_SCALE, col);
   }
+}
+
+static void drawPetCursor() {
+  int32_t left = (int32_t)_petCursorUntil - (int32_t)millis();
+  if (left <= 0) return;
+
+  int age = PET_CURSOR_MS - left;
+  int frame = (age / 170) % 3;
+  int dx = (frame == 1) ? 1 : (frame == 2) ? -1 : 0;
+  int dy = (frame == 1) ? 2 : 0;
+  int x = _petCursorX - 16 + dx;
+  int y = _petCursorY - 28 + dy;
+  x = clampi(x, SAFE_L + 8, SAFE_R - 38);
+  y = clampi(y, SAFE_T + 8, SAFE_B - 46);
+
+  auto palm = [&](int ox, int oy, uint16_t c) {
+    int px = x + ox;
+    int py = y + oy;
+    spr.fillRoundRect(px + 8,  py + 0,  6, 22, 2, c);
+    spr.fillRoundRect(px + 14, py + 0,  6, 23, 2, c);
+    spr.fillRoundRect(px + 20, py + 1,  6, 21, 2, c);
+    spr.fillRoundRect(px + 26, py + 4,  6, 18, 2, c);
+    spr.fillRoundRect(px + 8,  py + 17, 24, 18, 4, c);
+    spr.fillRoundRect(px + 12, py + 31, 15, 9, 2, c);
+    spr.fillTriangle(px + 9, py + 21, px + 1, py + 25, px + 10, py + 31, c);
+    spr.fillRoundRect(px + 1, py + 23, 11, 8, 2, c);
+  };
+
+  palm(1, 1, BLACK);
+  palm(0, 0, WHITE);
+  spr.drawFastVLine(x + 14, y + 4, 13, BLACK);
+  spr.drawFastVLine(x + 20, y + 5, 12, BLACK);
+  spr.drawFastVLine(x + 26, y + 8, 9, BLACK);
+  spr.drawPixel(x + 5, y + 29, BLACK);
+
+  if (left > 90) tinyHeart(x + 36, y + 10, true, HOT);
 }
 
 static void drawPetStats(const Palette& p) {
-  const int TOP = 70;
+  const int TOP = 76;
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
-  spr.setTextSize(1);
-  int y = TOP + 16;
+  spr.setTextSize(UI_SCALE);
+  int y = 106;
+  const int rowGap = 24;
 
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(SAFE_L, y - 2); spr.print("mood");
+  auto statRow = [&](const char* label, int yy) -> CircleBand {
+    CircleBand b = circleBand(yy - 8, 16, 14);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(b.x, yy - 6);
+    spr.print(label);
+    return b;
+  };
+
+  CircleBand b = statRow("mood", y);
   uint8_t mood = statsMoodTier();
   uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
-  for (int i = 0; i < 4; i++) tinyHeart(54 + i * 16, y + 2, i < mood, moodCol);
-
-  y += 20;
-  spr.setCursor(SAFE_L, y - 2); spr.print("fed");
-  uint8_t fed = statsFedProgress();
-  for (int i = 0; i < 10; i++) {
-    int px = 38 + i * 9;
-    if (i < fed) spr.fillCircle(px, y + 1, 2, p.body);
-    else spr.drawCircle(px, y + 1, 2, p.textDim);
+  int gx = b.x + b.w - 94;
+  for (int i = 0; i < 4; i++) {
+    tinyHeart(gx + i * 22, y - 2, i < mood, moodCol);
   }
 
-  y += 20;
-  spr.setCursor(SAFE_L, y - 2); spr.print("energy");
+  y += rowGap;
+  b = statRow("fed", y);
+  uint8_t fed = statsFedProgress();
+  uint8_t fedBars = (fed + 1) / 2;
+  gx = b.x + b.w - 114;
+  for (int i = 0; i < 5; i++) {
+    int px = gx + i * 23;
+    if (i < fedBars) spr.fillRoundRect(px, y - 8, 17, 10, 2, p.body);
+    else spr.drawRoundRect(px, y - 8, 17, 10, 2, p.textDim);
+  }
+
+  y += rowGap;
+  b = statRow("energy", y);
   uint8_t en = statsEnergyTier();
   uint16_t enCol = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
+  gx = b.x + b.w - 114;
   for (int i = 0; i < 5; i++) {
-    int px = 54 + i * 13;
-    if (i < en) spr.fillRect(px, y - 2, 9, 6, enCol);
-    else spr.drawRect(px, y - 2, 9, 6, p.textDim);
+    int px = gx + i * 23;
+    if (i < en) spr.fillRoundRect(px, y - 8, 17, 10, 2, enCol);
+    else spr.drawRoundRect(px, y - 8, 17, 10, 2, p.textDim);
   }
 
-  y += 24;
-  spr.fillRoundRect(SAFE_L, y - 2, 42, 14, 3, p.body);
+  y += 27;
+  b = circleBand(y - 10, 20, 18);
+  int pillW = 56;
+  spr.fillRoundRect(CX - pillW / 2, y - 10, pillW, 18, 3, p.body);
   spr.setTextColor(p.bg, p.body);
-  spr.setCursor(SAFE_L + 5, y + 1); spr.printf("Lv %u", stats().level);
+  spr.setCursor(CX - 22, y - 6);
+  spr.printf("Lv %u", stats().level);
 
-  y += 20;
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(SAFE_L, y);
-  spr.printf("approved %u", stats().approvals);
-  spr.setCursor(SAFE_L, y + 10);
-  spr.printf("denied   %u", stats().denials);
-  uint32_t nap = stats().napSeconds;
-  spr.setCursor(SAFE_L, y + 20);
-  spr.printf("napped   %luh%02lum", nap/3600, (nap/60)%60);
-  auto tokFmt = [&](const char* label, uint32_t v, int yPx) {
-    spr.setCursor(SAFE_L, yPx);
-    if (v >= 1000000)   spr.printf("%s%lu.%luM", label, v/1000000, (v/100000)%10);
-    else if (v >= 1000) spr.printf("%s%lu.%luK", label, v/1000, (v/100)%10);
-    else                spr.printf("%s%lu", label, v);
+  auto statFmt = [&](char* out, size_t n, const char* label, uint32_t v) {
+    if (v >= 1000000)   snprintf(out, n, "%s %lu.%luM", label, v/1000000, (v/100000)%10);
+    else if (v >= 1000) snprintf(out, n, "%s %lu.%luK", label, v/1000, (v/100)%10);
+    else                snprintf(out, n, "%s %lu", label, v);
   };
-  tokFmt("tokens   ", stats().tokens, y + 30);
-  tokFmt("today    ", tama.tokensToday, y + 40);
+  char left[18], right[18];
+  statFmt(left, sizeof(left), "tok", stats().tokens);
+  statFmt(right, sizeof(right), "day", tama.tokensToday);
+  b = circleBand(y + 22, UI_CHAR_H, 18);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.setCursor(b.x, y + 22);
+  spr.print(left);
+  spr.setCursor(b.x + b.w - textWidthPx(right), y + 22);
+  spr.print(right);
 }
 
 static void drawPetHowTo(const Palette& p) {
-  const int TOP = 70;
+  const int TOP = 76;
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
-  spr.setTextSize(1);
-  int y = TOP + 2;
+  spr.setTextSize(UI_SCALE);
+  int y = 106;
   auto ln = [&](uint16_t c, const char* s) {
-    spr.setTextColor(c, p.bg); spr.setCursor(SAFE_L, y); spr.print(s); y += 9;
+    CircleBand b = circleBand(y, UI_CHAR_H, 14);
+    spr.setTextColor(c, p.bg);
+    spr.setCursor(b.x, y);
+    spr.print(s);
+    y += 18;
   };
-  auto gap = [&]() { y += 4; };
-
-  y += 12;  // room for the PET header drawn by drawPet()
+  auto gap = [&]() { y += 5; };
 
   ln(p.body,    "MOOD");
-  ln(p.textDim, " approve fast = up");
-  ln(p.textDim, " deny lots = down"); gap();
+  ln(p.textDim, "fast approve helps"); gap();
 
   ln(p.body,    "FED");
-  ln(p.textDim, " 50K tokens =");
-  ln(p.textDim, " level up + confetti"); gap();
+  ln(p.textDim, "50K tokens = level"); gap();
 
   ln(p.body,    "ENERGY");
-  ln(p.textDim, " face-down to nap");
-  ln(p.textDim, " refills to full"); gap();
+  ln(p.textDim, "face-down to nap"); gap();
 
-  ln(p.textDim, "idle 30s = off");
-  ln(p.textDim, "any button = wake"); gap();
-
-  ln(p.textDim, "A: screens  B: page");
-  ln(p.textDim, "hold A: menu");
+  ln(p.textDim, "BOOT screens");
+  ln(p.textDim, "hold menu");
+  ln(p.textDim, "slide page");
 }
 
 void drawPet() {
@@ -877,30 +1078,93 @@ void drawPet() {
   if (petPage == 0) drawPetStats(p);
   else drawPetHowTo(p);
 
-  // Header on top of whichever page drew — title left, counter right
-  spr.setTextSize(1);
-  spr.setTextColor(p.text, p.bg);
-  spr.setCursor(SAFE_L, y + 2);
+  spr.setTextSize(UI_SCALE);
+  char title[22];
   if (ownerName()[0]) {
-    spr.printf("%s's %s", ownerName(), petName());
+    snprintf(title, sizeof(title), "%s's %s", ownerName(), petName());
   } else {
-    spr.print(petName());
+    snprintf(title, sizeof(title), "%s", petName());
   }
+  if (strlen(title) > 15) strcpy(title + 12, "...");
+  drawPageHeader(p, y + 2 * UI_SCALE, title, petPage, PET_PAGES);
+}
+
+static void formatCountdown(char* out, size_t n, uint32_t sec) {
+  if (sec >= 86400) snprintf(out, n, "%lud", (unsigned long)((sec + 86399) / 86400));
+  else if (sec >= 3600) snprintf(out, n, "%luh", (unsigned long)((sec + 3599) / 3600));
+  else snprintf(out, n, "%lum", (unsigned long)((sec + 59) / 60));
+}
+
+static void drawUsageBar(const Palette& p, int y, const char* label, uint8_t pct, uint32_t resetSec) {
+  char cd[8];
+  formatCountdown(cd, sizeof(cd), resetSec);
+  CircleBand b = circleBand(y, 18, 18);
+  int labelW = 4 * UI_CHAR_W;
+  int pctW = 4 * UI_CHAR_W;
+  int cdW = textWidthPx(cd, UI_SCALE);
+  int barX = b.x + labelW;
+  int barW = b.w - labelW - pctW - cdW - 12 * UI_SCALE;
+  if (barW < 34) return;
+  int fill = (barW - 2) * pct / 100;
+  spr.setTextSize(UI_SCALE);
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(SAFE_R - 24, y + 2);
-  spr.printf("%u/%u", petPage + 1, PET_PAGES);
+  spr.setCursor(b.x, y + 2);
+  spr.print(label);
+  spr.drawRoundRect(barX, y + 5, barW, 8, 2, p.textDim);
+  if (fill > 0) spr.fillRoundRect(barX + 1, y + 6, fill, 6, 2, p.body);
+  spr.setTextColor(p.text, p.bg);
+  spr.setCursor(barX + barW + 4 * UI_SCALE, y + 2);
+  spr.printf("%u%%", pct);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.setCursor(b.x + b.w - cdW, y + 2);
+  spr.print(cd);
+}
+
+static void drawBottleWidget(const Palette& p, int x, int y, const char* label,
+                             uint8_t usedPct, uint32_t resetSec) {
+  uint8_t remain = 100 - usedPct;
+  int bw = 28, bh = 46;
+  int fillH = (bh - 10) * remain / 100;
+  spr.drawRoundRect(x + 7, y + 6, bw - 14, 7, 2, p.textDim);
+  spr.drawRoundRect(x + 3, y + 12, bw - 6, bh - 12, 4, p.textDim);
+  if (fillH > 0) {
+    spr.fillRoundRect(x + 5, y + bh - 2 - fillH, bw - 10, fillH, 3, p.body);
+  }
+  spr.drawFastHLine(x + 6, y + 25, bw - 12, p.textDim);
+  spr.setTextSize(1);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.setCursor(x + 2, y + bh + 3);
+  spr.print(label);
+  char cd[8];
+  formatCountdown(cd, sizeof(cd), resetSec);
+  spr.setCursor(x + 2, y + bh + 13);
+  spr.print(cd);
+}
+
+static void drawHomeWidgets() {
+  if (!tama.usageValid || settings().widgetMode == 0) return;
+  const Palette& p = characterPalette();
+  if (settings().widgetMode == 1) {
+    spr.fillRect(0, 142, W, 50, p.bg);
+    drawUsageBar(p, 148, "4h", tama.usageSessionPct, tama.usageSessionResetSec);
+    drawUsageBar(p, 172, "week", tama.usageWeekPct, tama.usageWeekResetSec);
+  } else {
+    drawBottleWidget(p, 52, 126, "4h", tama.usageSessionPct, tama.usageSessionResetSec);
+    drawBottleWidget(p, W - 80, 126, "wk", tama.usageWeekPct, tama.usageWeekResetSec);
+  }
 }
 
 void drawHUD() {
-  if (tama.promptId[0]) { drawApproval(); return; }
+  if (tama.promptId[0] && !responseSent) { drawApproval(); return; }
+  if (tama.questionId[0] && !questionResponseSent) { drawQuestion(); return; }
   const Palette& p = characterPalette();
   // chill7 font: glyphs ~7 px tall but baseline-positioned (setCursor
   // is the baseline, not the top). Allow ~10 px line spacing, ~22 byte
   // budget per line — Chinese chars are ~7 px wide, ASCII ~5 px, so a
   // mixed line of 22 bytes (~7 Chinese OR 22 ASCII) fits W=184.
-  const int SHOW = 3, LH = 10, WIDTH = 22;
-  const int AREA = SHOW * LH + 4;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
+  const int SHOW = 3, LH = UI_LINE_H, WIDTH = 18;
+  const int HUD_TOP = SAFE_B - SHOW * LH - 4;
+  spr.fillRect(0, HUD_TOP, W, H - HUD_TOP, p.bg);
 
   // Menu/settings/reset should hide the HUD strip underneath — panels are
   // centered and don't cover the bottom 34 px on their own.
@@ -910,12 +1174,13 @@ void drawHUD() {
 
   // buddy/character ticks leave textsize at 2 (home scale); without
   // pinning it here the CJK font alternates between 1× and 2× every tick.
-  spr.setTextSize(1);
+  spr.setTextSize(UI_SCALE);
   spr.setFont((const uint8_t*)u8g2_font_chill7_h_cjk);
 
   if (tama.nLines == 0) {
+    CircleBand b = circleBand(SAFE_B - 20, UI_CHAR_H, 16);
     spr.setTextColor(p.text, p.bg);
-    spr.setCursor(SAFE_L, SAFE_B - 4);
+    spr.setCursor(b.x, SAFE_B - 20);
     spr.print(tama.msg);
     spr.setFont((const GFXfont*)NULL);
     return;
@@ -939,17 +1204,20 @@ void drawHUD() {
   for (int i = 0; start + i < end; i++) {
     uint8_t row = start + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
+    int yy = HUD_TOP + UI_CHAR_H + i * LH;
+    CircleBand b = circleBand(yy, UI_CHAR_H, 14);
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.setCursor(SAFE_L, H - AREA + 8 + i * LH);   // +8 = baseline offset for 7-px font
+    spr.setCursor(b.x, yy);
     spr.print(disp[row]);
   }
 
   spr.setFont((const GFXfont*)NULL);
 
   if (msgScroll > 0) {
-    spr.setTextSize(1);
+    spr.setTextSize(UI_SCALE);
     spr.setTextColor(p.body, p.bg);
-    spr.setCursor(SAFE_R - 18, SAFE_B - 10);
+    CircleBand b = circleBand(SAFE_B - 20, UI_CHAR_H, 14);
+    spr.setCursor(b.x + b.w - 18 * UI_SCALE, SAFE_B - 20);
     spr.printf("-%u", msgScroll);
   }
 }
@@ -961,6 +1229,8 @@ void setup() {
   lastInteractMs = millis();
   statsLoad();
   settingsLoad();
+  hwDisplaySetRotation(settings().uiRot);
+  hwInputSetRotation(settings().uiRot);
   petNameLoad();
   buddyInit();
 
@@ -1007,7 +1277,7 @@ void loop() {
 
   if ((int32_t)(now - oneShotUntil) >= 0) activeState = baseState;
 
-  // Attention indicator: AMOLED red border flash (replaces M5StickC LED).
+  // Attention indicator: display alert in place of a hardware LED.
   hwBorderAlert(activeState == P_ATTENTION && settings().led
                 && (now / 400) % 2 == 0);
 
@@ -1021,7 +1291,7 @@ void loop() {
     }
   }
 
-  // BtnA: step through fake scenarios
+  // Primary control: step through fake scenarios.
   // Prompt arrival: beep, reset response flag
   if (strcmp(tama.promptId, lastPromptId) != 0) {
     strncpy(lastPromptId, tama.promptId, sizeof(lastPromptId)-1);
@@ -1041,7 +1311,28 @@ void loop() {
     }
   }
 
-  bool inPrompt = tama.promptId[0] && !responseSent;
+  static char lastQuestionId[40] = "";
+  if (strcmp(tama.questionId, lastQuestionId) != 0) {
+    strncpy(lastQuestionId, tama.questionId, sizeof(lastQuestionId)-1);
+    lastQuestionId[sizeof(lastQuestionId)-1] = 0;
+    questionResponseSent = false;
+    questionSel = 0;
+    if (tama.questionId[0]) {
+      questionArrivedMs = millis();
+      wake();
+      beep(1400, 80);
+      displayMode = DISP_NORMAL;
+      menuOpen = settingsOpen = resetOpen = false;
+      applyDisplayMode();
+      characterInvalidate();
+      if (buddyMode) buddyInvalidate();
+    }
+  }
+
+  if (questionSel >= tama.questionCount) questionSel = 0;
+  bool inPermission = tama.promptId[0] && !responseSent;
+  bool inQuestion = tama.questionId[0] && !questionResponseSent;
+  bool inPrompt = inPermission || inQuestion;
 
   // Button-press wake. Track which button woke the screen so its full
   // press cycle (including long-press) is swallowed — you don't want
@@ -1054,9 +1345,7 @@ void loop() {
     wake();
   }
 
-  // Key3 long-press (~1s, AXP IRQ 0x04) toggles screen off — replaces
-  // M5StickC's PWR short-press behaviour (we only have 2 buttons; short
-  // press of Key3 is BtnB, so screen-toggle moves to long-press).
+  // Optional power-key path retained for HAL compatibility.
   // Very-long-press (6s) still powers off via AXP hardware.
   if (hwAxpBtnEvent() == 0x04) {
     if (screenOff) {
@@ -1070,6 +1359,19 @@ void loop() {
   if (hwBtnA().pressedFor(600) && !btnALong && !swallowBtnA) {
     btnALong = true;
     beep(800, 60);
+#if defined(BOARD_SINGLE_BUTTON_MENU_CONFIRM) && BOARD_SINGLE_BUTTON_MENU_CONFIRM
+    if (inPermission) {
+      sendPermissionDecision(false);
+    } else if (inQuestion) {
+      sendQuestionAnswer(questionSel);
+    } else if (resetOpen) { applyReset(resetSel); }
+    else if (settingsOpen) { applySetting(settingsSel); }
+    else if (menuOpen) { menuConfirm(); }
+    else {
+      menuOpen = true;
+      menuSel = 0;
+    }
+#else
     if (resetOpen) { resetOpen = false; }
     else if (settingsOpen) { settingsOpen = false; characterInvalidate(); }
     else {
@@ -1077,19 +1379,16 @@ void loop() {
       menuSel = 0;
       if (!menuOpen) characterInvalidate();
     }
+#endif
     Serial.println(menuOpen ? "menu open" : "menu close");
   }
   if (hwBtnA().wasReleased) {
     if (!btnALong && !swallowBtnA) {
-      if (inPrompt) {
-        char cmd[96];
-        snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"once\"}", tama.promptId);
-        sendCmd(cmd);
-        responseSent = true;
-        uint32_t tookS = (millis() - promptArrivedMs) / 1000;
-        statsOnApproval(tookS);
-        beep(2400, 60);
-        if (tookS < 5) triggerOneShot(P_HEART, 2000);
+      if (inPermission) {
+        sendPermissionDecision(true);
+      } else if (inQuestion) {
+        beep(1800, 30);
+        questionSel = (questionSel + 1) % tama.questionCount;
       } else if (resetOpen) {
         beep(1800, 30);
         resetSel = (resetSel + 1) % RESET_N;
@@ -1110,17 +1409,14 @@ void loop() {
     swallowBtnA = false;
   }
 
-  // BtnB: pet → heart
+  // Secondary control: pet -> heart.
   if (hwBtnB().wasPressed) {
     if (swallowBtnB) { swallowBtnB = false; }
     else
-    if (inPrompt) {
-      char cmd[96];
-      snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"deny\"}", tama.promptId);
-      sendCmd(cmd);
-      responseSent = true;
-      statsOnDenial();
-      beep(600, 60);
+    if (inPermission) {
+      sendPermissionDecision(false);
+    } else if (inQuestion) {
+      sendQuestionAnswer(questionSel);
     } else if (resetOpen) {
       beep(2400, 30);
       applyReset(resetSel);
@@ -1156,37 +1452,35 @@ void loop() {
 
   // Approval: tap upper half of the approval area = approve,
   //           tap lower half = deny.
-  if (inPrompt) {
-    const int APPROVAL_TOP = H - 78;
-    if (tap(0, APPROVAL_TOP,      W, 39)) {
-      char cmd[96];
-      snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"once\"}", tama.promptId);
-      sendCmd(cmd);
-      responseSent = true;
-      uint32_t tookS = (millis() - promptArrivedMs) / 1000;
-      statsOnApproval(tookS);
-      beep(2400, 60);
-      if (tookS < 5) triggerOneShot(P_HEART, 2000);
+  if (inPermission) {
+    const int APPROVAL_TOP = H - 112;
+    if (tap(0, APPROVAL_TOP,      W, 56)) {
+      sendPermissionDecision(true);
     }
-    if (tap(0, APPROVAL_TOP + 39, W, 39)) {
-      char cmd[96];
-      snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"deny\"}", tama.promptId);
-      sendCmd(cmd);
-      responseSent = true;
-      statsOnDenial();
-      beep(600, 60);
+    if (tap(0, APPROVAL_TOP + 56, W, 56)) {
+      sendPermissionDecision(false);
+    }
+  } else if (inQuestion) {
+    const HwTouch& t = hwTouch();
+    if (t.justPressed) {
+      for (uint8_t i = 0; i < tama.questionCount && i < 4; i++) {
+        int rx, ry, rw, rh;
+        if (questionRowRect(i, rx, ry, rw, rh) &&
+            t.x >= rx && t.x < rx + rw && t.y >= ry && t.y < ry + rh) {
+          questionSel = i;
+          sendQuestionAnswer(i);
+          break;
+        }
+      }
     }
   } else if (menuOpen || settingsOpen || resetOpen) {
     // Tap a menu row → directly select + confirm. Reuses the layout
     // constants from drawMenu/drawSettings/drawReset.
-    int n      = menuOpen ? MENU_N : settingsOpen ? SETTINGS_N : RESET_N;
-    int hint   = MENU_HINT_H;
-    int mw     = 118;
-    int mh     = 16 + n * 14 + hint;
-    int mx     = (W - mw) / 2;
-    int my     = (H - mh) / 2;
-    int rowH   = 14;
-    int rowsTop = my + 8;
+    int n = menuOpen ? MENU_N : settingsOpen ? SETTINGS_N : RESET_N;
+    int mx, my, mw, mh;
+    menuLayout(n, mx, my, mw, mh);
+    int rowH   = MENU_ROW_H;
+    int rowsTop = my + 7 * UI_SCALE;
     const HwTouch& t = hwTouch();
     if (t.justPressed && t.x >= mx && t.x < mx + mw &&
         t.y >= rowsTop && t.y < rowsTop + n * rowH) {
@@ -1198,12 +1492,38 @@ void loop() {
         else /* resetOpen */  { resetSel    = hit; applyReset(hit); }
       }
     }
+    int footerY = my + mh - 18 * UI_SCALE;
+    int gap = 2 * UI_SCALE;
+    int bw = (mw - 2 * gap - MENU_PAD_X * 2) / 3;
+    int bh = 16 * UI_SCALE;
+    int bx = mx + MENU_PAD_X;
+    if (t.justPressed && t.y >= footerY && t.y < footerY + bh) {
+      int action = -1;
+      for (int i = 0; i < 3; i++) {
+        int x0 = bx + i * (bw + gap);
+        if (t.x >= x0 && t.x < x0 + bw) action = i;
+      }
+      if (action >= 0) {
+        beep(1800, 30);
+        uint8_t* sel = menuOpen ? &menuSel : settingsOpen ? &settingsSel : &resetSel;
+        if (action == 0) {
+          *sel = (*sel + n - 1) % n;
+          if (resetOpen) resetConfirmIdx = 0xFF;
+        } else if (action == 1) {
+          *sel = (*sel + 1) % n;
+          if (resetOpen) resetConfirmIdx = 0xFF;
+        } else {
+          if (menuOpen) menuConfirm();
+          else if (settingsOpen) applySetting(settingsSel);
+          else applyReset(resetSel);
+        }
+      }
+    }
   }
   // END of press-based approval/overlay taps. Below: release-based classifier
-  // for DISP_NORMAL / DISP_PET / DISP_INFO (vertical swipe cycles mode,
-  // horizontal swipe in clock mode cycles species, stationary tap routes
-  // to region-specific actions). Approval and overlay menus are excluded
-  // so an accidental drag can't mis-decide.
+  // for DISP_NORMAL / DISP_PET / DISP_INFO. Horizontal swipes page through
+  // the whole flat chain. Approval and overlay menus are excluded so an
+  // accidental drag can't mis-decide.
 
   if (tp.justReleased
       && !inPrompt && !menuOpen && !settingsOpen && !resetOpen
@@ -1212,18 +1532,12 @@ void loop() {
     int dy = (int)tp.y - _tpStartY;
     uint32_t dt = millis() - _tpStartMs;
 
-    if (abs(dy) >= 40 && abs(dy) > abs(dx) * 2 && dt < 500) {
-      // Vertical swipe → advance one step in the flat 9-page cycle
-      // (up = next, down = previous). Key1 keeps the coarser 3-mode cycle.
+    if (abs(dx) >= 40 && abs(dx) > abs(dy) * 2 && dt < 500) {
+      // Horizontal swipe through the flat page chain: right-to-left = next,
+      // left-to-right = previous.
       beep(1800, 30);
-      if (dy < 0) swipeNextPage();
+      if (dx < 0) swipeNextPage();
       else        swipePrevPage();
-    }
-    else if (tpClocking && abs(dx) >= 40 && abs(dx) > abs(dy) * 2 && dt < 500) {
-      // Horizontal swipe in clock mode → cycle species (unchanged behaviour).
-      beep(2400, 30);
-      if (dx > 0) nextPet(); else prevPet();
-      _playfulUntil = millis() + PLAYFUL_MS;
     }
     else if (abs(dx) < 12 && abs(dy) < 12 && dt < 800) {
       // Stationary tap → route by press-start position.
@@ -1236,9 +1550,17 @@ void loop() {
         petPage = (petPage + 1) % PET_PAGES;
         applyDisplayMode();
       }
-      else if (displayMode == DISP_NORMAL && !tpClocking && tappedFrom(12, 20, W - 24, 110)) {
-        // Tap buddy body → heart reaction (HUD; clock mode uses the block below).
+      else if (displayMode == DISP_PET && tappedFrom(CX - 70, 66, 140, 84)) {
         triggerOneShot(P_HEART, 2000);
+        triggerPetCursor(_tpStartX, _tpStartY);
+        characterInvalidate();
+        if (buddyMode) buddyInvalidate();
+        beep(2400, 50);
+      }
+      else if (displayMode == DISP_NORMAL && !tpClocking && tappedFrom(0, 0, W, (H * 2) / 3)) {
+        // Top two-thirds → pet buddy. Bottom strip remains transcript scroll.
+        triggerOneShot(P_HEART, 2000);
+        triggerPetCursor(_tpStartX, _tpStartY);
         _playfulUntil = millis() + PLAYFUL_MS;
         characterInvalidate();
         if (buddyMode) buddyInvalidate();
@@ -1252,6 +1574,7 @@ void loop() {
       else if (tpClocking && _tpStartY < 130) {
         // Clock mode upper half = buddy region (lower half is clock digits).
         triggerOneShot(P_HEART, 2000);
+        triggerPetCursor(_tpStartX, _tpStartY);
         _playfulUntil = millis() + PLAYFUL_MS;
         characterInvalidate();
         if (buddyMode) buddyInvalidate();
@@ -1276,7 +1599,7 @@ void loop() {
                && !menuOpen && !settingsOpen && !resetOpen && !inPrompt
                && tama.sessionsRunning == 0 && tama.sessionsWaiting == 0
                && dataRtcValid();
-  // Portrait-only clock on AMOLED port; landscape was removed.
+  // Portrait-only clock.
   static bool wasClocking = false;
   if (clocking != wasClocking) {
     if (clocking) {
@@ -1340,19 +1663,18 @@ void loop() {
     spr.setTextSize(1);
     if (xferActive()) {
       uint32_t done = xferProgress(), total = xferTotal();
-      spr.setCursor(SAFE_L, 90);
-      spr.print("installing");
-      spr.setCursor(SAFE_L, 102);
-      spr.printf("%luK / %luK", done/1024, total/1024);
-      int barW = W - 16;
-      spr.drawRect(SAFE_L, 116, barW, 8, p.textDim);
+      drawBandText(90, "installing", p.textDim, p.bg, UI_SCALE, 0, 18);
+      drawBandPrintf(112, p.textDim, p.bg, UI_SCALE, 0, 18,
+                     "%luK / %luK", done/1024, total/1024);
+      CircleBand b = circleBand(136, 8, 24);
+      spr.drawRect(b.x, 136, b.w, 8, p.textDim);
       if (total > 0) {
-        int fill = (int)((uint64_t)barW * done / total);
-        if (fill > 1) spr.fillRect(SAFE_L + 1, 117, fill - 1, 6, p.body);
+        int fill = (int)((uint64_t)b.w * done / total);
+        if (fill > 1) spr.fillRect(b.x + 1, 137, fill - 1, 6, p.body);
       }
     } else {
-      spr.setCursor(SAFE_L, 100);
-      spr.print("no character loaded");
+      drawBandText(112, "no character", p.textDim, p.bg, UI_SCALE, 0, 18);
+      drawBandText(134, "loaded", p.textDim, p.bg, UI_SCALE, 0, 18);
     }
   }
   if (!napping && !screenOff) {
@@ -1360,7 +1682,13 @@ void loop() {
     else if (clocking) drawClock();
     else if (displayMode == DISP_INFO) drawInfo();
     else if (displayMode == DISP_PET) drawPet();
-    else if (settings().hud) drawHUD();
+    else if (inPermission) drawApproval();
+    else if (inQuestion) drawQuestion();
+    else {
+      drawHomeWidgets();
+      if (settings().hud) drawHUD();
+    }
+    drawPetCursor();
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
     else if (menuOpen) drawMenu();
@@ -1405,7 +1733,7 @@ void loop() {
     }
   }
 
-  // AMOLED burn-in mitigation: every 5 min force a full canvas redraw.
+  // Periodic full redraw.
   // OLED pixels degrade where they stay lit at constant value; redrawing
   // (rather than incremental updates) at least exercises every pixel for
   // a frame. A more aggressive 1-px shimmy could shift the whole canvas

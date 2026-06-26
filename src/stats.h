@@ -182,10 +182,12 @@ struct Settings {
   bool wifi;     // placeholder — no WiFi stack linked yet, just stores the pref
   bool led;
   bool hud;
-  uint8_t clockRot;  // 0=auto 1=portrait 2=landscape
+  uint8_t clockRot;  // legacy clock-only rotation setting, no longer shown
+  uint8_t uiRot;     // 0=0deg 1=90deg 2=180deg 3=270deg
+  uint8_t widgetMode; // 0=off 1=simple 2=fun
 };
 
-static Settings _settings = { true, true, false, true, true, 0 };
+static Settings _settings = { true, true, false, true, true, 0, 0, 1 };
 
 inline void settingsLoad() {
   _prefs.begin("buddy", true);
@@ -196,6 +198,10 @@ inline void settingsLoad() {
   _settings.hud      = _prefs.getBool("s_hud", true);
   _settings.clockRot = _prefs.getUChar("s_crot", 0);
   if (_settings.clockRot > 2) _settings.clockRot = 0;
+  _settings.uiRot = _prefs.getUChar("s_uirot", 0);
+  if (_settings.uiRot > 3) _settings.uiRot = 0;
+  _settings.widgetMode = _prefs.getUChar("s_widg", 1);
+  if (_settings.widgetMode > 2) _settings.widgetMode = 1;
   _prefs.end();
 }
 
@@ -207,6 +213,8 @@ inline void settingsSave() {
   _prefs.putBool("s_led", _settings.led);
   _prefs.putBool("s_hud", _settings.hud);
   _prefs.putUChar("s_crot", _settings.clockRot);
+  _prefs.putUChar("s_uirot", _settings.uiRot);
+  _prefs.putUChar("s_widg", _settings.widgetMode);
   _prefs.end();
 }
 

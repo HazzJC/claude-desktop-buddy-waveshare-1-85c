@@ -4,7 +4,9 @@
 #include "hw/power.h"
 #include <Arduino.h>
 
-#if BOARD_TOUCH_CST92XX
+#if BOARD_TOUCH_CST816
+  #include <Wire.h>
+#elif BOARD_TOUCH_CST92XX
   #include <Wire.h>
   #include "TouchDrvCSTXXX.hpp"
 #else
@@ -14,8 +16,11 @@
 static HwBtn   s_a, s_b;
 static HwTouch s_tp;
 static uint8_t s_axpEvt = 0;
+static uint8_t s_touchRot = 0;
 
-#if BOARD_TOUCH_CST92XX
+#if BOARD_TOUCH_CST816
+static uint8_t s_cst816Points = 0;
+#elif BOARD_TOUCH_CST92XX
 static TouchDrvCST92xx s_cst;
 #else
 static std::shared_ptr<Arduino_IIC_DriveBus> s_iicBus;
@@ -29,6 +34,32 @@ bool HwBtn::pressedFor(uint32_t ms) {
   return isPressed && (millis() - pressedAt) >= ms;
 }
 
+void hwInputSetRotation(uint8_t quarterTurns) {
+  s_touchRot = quarterTurns & 0x03;
+}
+
+static void applyTouchRotation(int& x, int& y) {
+  int ox = x, oy = y;
+  switch (s_touchRot) {
+    case 1:
+      x = oy;
+      y = BOARD_HW_H - 1 - ox;
+      break;
+    case 2:
+      x = BOARD_HW_W - 1 - ox;
+      y = BOARD_HW_H - 1 - oy;
+      break;
+    case 3:
+      x = BOARD_HW_W - 1 - oy;
+      y = ox;
+      break;
+    default:
+      break;
+  }
+  if (x < 0) x = 0; else if (x >= BOARD_HW_W) x = BOARD_HW_W - 1;
+  if (y < 0) y = 0; else if (y >= BOARD_HW_H) y = BOARD_HW_H - 1;
+}
+
 bool hwInputInit() {
   pinMode(PIN_KEY1, INPUT_PULLUP);   // GPIO0 has external pullup; INPUT_PULLUP is harmless
 #if BOARD_HAS_KEY2
@@ -38,10 +69,17 @@ bool hwInputInit() {
   pinMode(PIN_KEY_BOOT, INPUT_PULLUP);   // External R8 10K already pulls high; INPUT_PULLUP is harmless
 #endif
 
-#if BOARD_TOUCH_CST92XX
-  // CST92xx @ 0x5A via SensorLib. Reset is handled by hwExpanderResetSequence()
-  // (TP_RST is shared with LCD_RESET on 1.75C), so pass rstPin=-1 to skip the
-  // driver's internal reset — otherwise it would also re-reset the display.
+#if BOARD_TOUCH_CST816
+  pinMode(PIN_TP_INT, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_TP_INT), onTouchIrq, FALLING);
+  uint8_t noSleep = 10;
+  Wire.beginTransmission(0x15);
+  Wire.write(0xFE);
+  Wire.write(noSleep);
+  Wire.endTransmission(true);
+  return true;
+#elif BOARD_TOUCH_CST92XX
+  // CST92xx path retained for compile-time HAL compatibility.
   s_cst.setPins(-1, PIN_TP_INT);
   if (!s_cst.begin(Wire, 0x5A, PIN_I2C_SDA, PIN_I2C_SCL)) {
     Serial.println("hwInput: CST92xx init failed");
@@ -66,7 +104,7 @@ bool hwInputInit() {
 #endif
 }
 
-static void scanKey1() {
+static void scanBootButton() {
   uint32_t now = millis();
 #if BOARD_KEY1_ACTIVE_HIGH
   bool pressed = digitalRead(PIN_KEY1) == HIGH;
@@ -91,9 +129,7 @@ static void scanKey2() {
 #endif
 
 #if BOARD_BTN_THIRD
-// BOOT key (GPIO9 on 2.16) acts as a menu shortcut: a short tap synthesises
-// BTN_A_LONG_PRESS, which main.cpp's existing handler treats as "open menu".
-// main.cpp itself is unchanged.
+// Optional BOOT shortcut path retained for compile-time HAL compatibility.
 static uint32_t s_bootPressedAt = 0;
 static void scanBootKey() {
   bool pressed = digitalRead(PIN_KEY_BOOT) == LOW;
@@ -113,7 +149,7 @@ static void scanBootKey() {
 }
 #endif
 
-#if !BOARD_HAS_KEY2
+#if !BOARD_HAS_KEY2 && BOARD_HAS_AXP2101
 static void scanAxp() {
   if (hwExpanderAxpIrqLow()) {
     if (hwAxpPekeyShortPress()) s_axpEvt = 0x02;
@@ -126,6 +162,17 @@ static void scanAxp() {
   s_b.isPressed   = false;
   if (pressed) s_axpEvt = 0;
   // 0x04 stays in s_axpEvt until consumed by hwAxpBtnEvent()
+}
+#endif
+
+#if BOARD_TOUCH_CST816
+static bool cst816Read(uint8_t reg, uint8_t* data, uint8_t len) {
+  Wire.beginTransmission(0x15);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;
+  if (Wire.requestFrom(0x15, len) != len) return false;
+  for (uint8_t i = 0; i < len; i++) data[i] = Wire.read();
+  return true;
 }
 #endif
 
@@ -142,7 +189,31 @@ static void scanTouch() {
     return;
   }
 
-#if BOARD_TOUCH_CST92XX
+#if BOARD_TOUCH_CST816
+  uint8_t buf[6] = {0};
+  bool ok = cst816Read(0x01, buf, sizeof(buf));
+  s_cst816Points = ok ? (buf[1] & 0x0F) : 0;
+  if (s_cst816Points > 0) {
+    int rx = ((buf[2] & 0x0F) << 8) | buf[3];
+    int ry = ((buf[4] & 0x0F) << 8) | buf[5];
+    s_tp.justPressed  = !s_tp.down;
+    s_tp.justReleased = false;
+    int dx = rx - BOARD_DISPLAY_OFFSET_X;
+    int dy = ry - BOARD_DISPLAY_OFFSET_Y;
+    int tx = dx / BOARD_DISPLAY_SCALE;
+    int ty = dy / BOARD_DISPLAY_SCALE;
+    if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
+    if (ty < 0) ty = 0; else if (ty >= BOARD_HW_H) ty = BOARD_HW_H - 1;
+    applyTouchRotation(tx, ty);
+    s_tp.x = tx;
+    s_tp.y = ty;
+    s_tp.down = true;
+  } else {
+    s_tp.justReleased = s_tp.down;
+    s_tp.down = false;
+    s_tp.justPressed  = false;
+  }
+#elif BOARD_TOUCH_CST92XX
   int16_t x[2] = {0}, y[2] = {0};
   uint8_t n = s_cst.getPoint(x, y, s_cst.getSupportTouchPoint());
   if (n > 0) {
@@ -160,17 +231,19 @@ static void scanTouch() {
       int ty = (dy * BOARD_HW_H) / BOARD_DISPLAY_DEST_H;
       if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
       if (ty < 0) ty = 0; else if (ty >= BOARD_HW_H) ty = BOARD_HW_H - 1;
+      applyTouchRotation(tx, ty);
       s_tp.x = tx;
       s_tp.y = ty;
     #else
       // Non-letterbox: physical → canvas via OFFSET subtract + scale downscale.
-      // OFFSET is 0 on 1.8 (full-fill), 148/128 on 2.16 (centred 184×224 in 480×480).
+      // Physical touch coordinates map back into the logical canvas.
       int dx = x[0] - BOARD_DISPLAY_OFFSET_X;
       int dy = y[0] - BOARD_DISPLAY_OFFSET_Y;
       int tx = dx / BOARD_DISPLAY_SCALE;
       int ty = dy / BOARD_DISPLAY_SCALE;
       if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
       if (ty < 0) ty = 0; else if (ty >= BOARD_HW_H) ty = BOARD_HW_H - 1;
+      applyTouchRotation(tx, ty);
       s_tp.x = tx;
       s_tp.y = ty;
     #endif
@@ -196,6 +269,7 @@ static void scanTouch() {
     int ty = dy / BOARD_DISPLAY_SCALE;
     if (tx < 0) tx = 0; else if (tx >= BOARD_HW_W) tx = BOARD_HW_W - 1;
     if (ty < 0) ty = 0; else if (ty >= BOARD_HW_H) ty = BOARD_HW_H - 1;
+    applyTouchRotation(tx, ty);
     s_tp.x = tx;
     s_tp.y = ty;
     s_tp.down = true;
@@ -208,11 +282,15 @@ static void scanTouch() {
 }
 
 void hwInputUpdate() {
-  scanKey1();
+  scanBootButton();
 #if BOARD_HAS_KEY2
   scanKey2();
-#else
+#elif BOARD_HAS_AXP2101
   scanAxp();
+#else
+  s_b.wasPressed = false;
+  s_b.wasReleased = false;
+  s_b.isPressed = false;
 #endif
 #if BOARD_BTN_THIRD
   scanBootKey();

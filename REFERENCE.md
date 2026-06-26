@@ -51,6 +51,12 @@ a keepalive every 10 seconds:
   "entries": ["10:42 git push", "10:41 yarn test", "10:39 reading file..."],
   "tokens": 184502,
   "tokens_today": 31200,
+  "usage": {
+    "session_pct": 42,
+    "session_reset_sec": 3600,
+    "week_pct": 67,
+    "week_reset_sec": 172800
+  },
   "prompt": {
     "id": "req_abc123",
     "tool": "Bash",
@@ -68,6 +74,7 @@ a keepalive every 10 seconds:
 | `entries`      | Recent transcript lines, newest first (capped to a few)                           |
 | `tokens`       | Cumulative output tokens since the desktop app started                            |
 | `tokens_today` | Output tokens since local midnight (persisted, survives restart)                  |
+| `usage`        | Optional 4-hour and weekly usage widget data                                      |
 | `prompt`       | Only present when a permission decision is needed. The `id` is what you echo back |
 
 A few useful derived signals: `running > 0` means at least one session is
@@ -104,6 +111,35 @@ When `prompt` is present, your device can return a response. Send one of:
 
 The `id` must match `prompt.id` exactly. The desktop forwards this to the
 session manager: `"once"` approves the tool call, `"deny"` rejects it.
+
+## Question answers
+
+The firmware also understands a pending question prompt with up to four
+touch-selectable options:
+
+```json
+{
+  "question": {
+    "id": "q_abc123",
+    "prompt": "Which branch should I use?",
+    "options": ["main", "develop", "release", "cancel"]
+  }
+}
+```
+
+`choices` or `answers` may be used instead of `options`. A compatible
+`questions` array is also accepted; if the first item is a question object
+with options, the firmware displays that question, otherwise up to four array
+items become the selectable options.
+
+When the user taps an option, or cycles with BOOT and confirms with the side
+switch, the device sends:
+
+```json
+{"cmd":"question","id":"q_abc123","choice":1,"answer":"develop"}
+```
+
+The desktop side should cap options to four before sending to the device.
 
 ## One-shot on connect
 

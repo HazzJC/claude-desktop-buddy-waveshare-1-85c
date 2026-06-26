@@ -125,10 +125,23 @@ void bleInit(const char* deviceName) {
   sec->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
 
   BLEAdvertising* adv = BLEDevice::getAdvertising();
-  adv->addServiceUUID(NUS_SERVICE_UUID);
+  // BLE legacy advertising has only 31 bytes. Put the human-readable name
+  // in the primary advertisement and the 128-bit Nordic UART service UUID in
+  // the scan response so both generic macOS scanners and Claude's service
+  // filter can discover us reliably.
+  BLEAdvertisementData advData;
+  advData.setFlags(0x06); // LE general discoverable + BR/EDR unsupported
+  advData.setName(deviceName);
+  adv->setAdvertisementData(advData);
+
+  BLEAdvertisementData scanRsp;
+  scanRsp.setCompleteServices(BLEUUID(NUS_SERVICE_UUID));
+  adv->setScanResponseData(scanRsp);
   adv->setScanResponse(true);
   adv->setMinPreferred(0x06);   // iOS-friendly connection interval
   adv->setMaxPreferred(0x12);
+  adv->setMinInterval(0x20);
+  adv->setMaxInterval(0x40);
   BLEDevice::startAdvertising();
   Serial.printf("[ble] advertising as '%s'\n", deviceName);
 }

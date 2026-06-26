@@ -3,7 +3,9 @@
 #include <Arduino.h>
 
 static Arduino_DataBus*  s_bus    = nullptr;
-#if BOARD_DISPLAY_CO5300
+#if BOARD_DISPLAY_ST77916
+static Arduino_ST77916*  s_gfx    = nullptr;
+#elif BOARD_DISPLAY_CO5300
 static Arduino_CO5300*   s_gfx    = nullptr;
 #else
 static Arduino_SH8601*   s_gfx    = nullptr;
@@ -13,8 +15,7 @@ static Arduino_Canvas*   s_canvas = nullptr;
 static const uint8_t BRIGHT_LUT[5] = { 50, 100, 150, 200, 255 };
 
 #if BOARD_DISPLAY_SH8601_VENDOR_INIT
-// LVGL demo SH8601 init for the 2.16 panel revision.
-// Source: ~/Downloads/ESP32-C6-Touch-AMOLED-2.16/02_Example/Arduino-v3.3.3/08_LVGL_V8_Test/bsp_lvgl_port.cpp:25-41
+// Legacy SH8601 init path retained for compile-time HAL compatibility.
 // Re-runs after Arduino_SH8601's basic init to override pixel format,
 // MADCTL, gamma / power-related vendor commands, set the column/row
 // range to the full 480×480, push brightness to max, and re-issue
@@ -53,11 +54,17 @@ bool hwDisplayInit() {
     PIN_LCD_SDIO2, PIN_LCD_SDIO3);
 #if BOARD_DISPLAY_CO5300
   // CO5300 ctor: (bus, rst, rotation, w, h, col_off1, row_off1, col_off2, row_off2)
-  // col_offset1 = 6 on round 466×466 (1.75c), 0 on rounded-square 480×480 (S3-2.16).
   // Pass PIN_LCD_RESET so the driver does its own 200 ms hardware reset —
   // the 20 ms pulse from hwExpanderResetSequence() is too short for CO5300.
   s_gfx = new Arduino_CO5300(s_bus, PIN_LCD_RESET, BOARD_DISPLAY_ROTATION,
                              LCD_W_PHYS, LCD_H_PHYS, BOARD_CO5300_COL_OFFSET, 0, 0, 0);
+#elif BOARD_DISPLAY_ST77916
+  // ST77916 reset is handled via TCA9554 before display init.
+  s_gfx = new Arduino_ST77916(s_bus, GFX_NOT_DEFINED, BOARD_DISPLAY_ROTATION,
+                              true, LCD_W_PHYS, LCD_H_PHYS,
+                              0, 0, 0, 0,
+                              st77916_150_init_operations,
+                              sizeof(st77916_150_init_operations));
 #else
   s_gfx = new Arduino_SH8601(s_bus, GFX_NOT_DEFINED, 0, LCD_W_PHYS, LCD_H_PHYS);
 #endif
@@ -76,6 +83,14 @@ bool hwDisplayInit() {
   s_bus->writeC8D8(0x36, BOARD_CO5300_MADCTL);
   s_bus->endWrite();
 #endif
+#if BOARD_DISPLAY_ST77916
+  // Waveshare's esp_lcd driver sets RGB565 as 0x55 before vendor init.
+  // Arduino_GFX's alternate table ends with 0x05, which can partially
+  // wake the panel but corrupt the following color stream.
+  s_bus->beginWrite();
+  s_bus->writeC8D8(0x3A, 0x55);
+  s_bus->endWrite();
+#endif
 #if BOARD_DISPLAY_SH8601_VENDOR_INIT
   sh8601_vendor_init(s_bus);
   // The vendor init ends with brightness max (0x51 0xFF) and DISPON.
@@ -83,9 +98,20 @@ bool hwDisplayInit() {
   // the controller had at power-up.
   s_gfx->fillScreen(0x0000);
 #else
+#if BOARD_DISPLAY_PWM_BACKLIGHT
+  pinMode(PIN_LCD_BL, OUTPUT);
+  ledcAttach(PIN_LCD_BL, 20000, 10);
+  ledcWrite(PIN_LCD_BL, 0);
+#else
   s_gfx->setBrightness(0);   // black first frame to avoid white flash
+#endif
   delay(20);
+#if BOARD_DISPLAY_PWM_BACKLIGHT
+  ledcWrite(PIN_LCD_BL, 600);
+#else
   s_gfx->setBrightness(150);  // default mid-brightness; main may override later
+#endif
+  s_gfx->fillScreen(0x0000);
 #endif
   return true;
 }
@@ -94,12 +120,21 @@ Arduino_Canvas* hwCanvas() { return s_canvas; }
 
 void hwDisplayBrightness(uint8_t lvl) {
   if (lvl > 4) lvl = 4;
+#if BOARD_DISPLAY_PWM_BACKLIGHT
+  static const uint16_t PWM_LUT[5] = { 80, 260, 500, 760, 1024 };
+  ledcWrite(PIN_LCD_BL, PWM_LUT[lvl]);
+#else
   s_gfx->setBrightness(BRIGHT_LUT[lvl]);
+#endif
 }
 
 void hwDisplaySleep(bool off) {
   if (off) {
+#if BOARD_DISPLAY_PWM_BACKLIGHT
+    ledcWrite(PIN_LCD_BL, 0);
+#else
     s_gfx->setBrightness(0);
+#endif
     s_gfx->displayOff();
   } else {
     s_gfx->displayOn();
@@ -109,12 +144,26 @@ void hwDisplaySleep(bool off) {
 
 static uint16_t s_lineBuf[LCD_W_PHYS];   // one physical row, internal RAM
 static bool     s_borderAlertOn = false;
+static uint8_t  s_uiRot = 0;
 
 extern "C" void hwBorderAlertSetInternal(bool on);  // forward decl from border.cpp
 
 void hwBorderAlertSetInternal(bool on) { s_borderAlertOn = on; }
 
 static const uint16_t BORDER_RED = 0xF800;
+
+void hwDisplaySetRotation(uint8_t quarterTurns) {
+  s_uiRot = quarterTurns & 0x03;
+}
+
+static inline uint16_t rotatedPixel(const uint16_t* src, int x, int y) {
+  switch (s_uiRot) {
+    case 1: return src[(BOARD_HW_H - 1 - x) * BOARD_HW_W + y];
+    case 2: return src[(BOARD_HW_H - 1 - y) * BOARD_HW_W + (BOARD_HW_W - 1 - x)];
+    case 3: return src[x * BOARD_HW_W + (BOARD_HW_W - 1 - y)];
+    default: return src[y * BOARD_HW_W + x];
+  }
+}
 
 void hwDisplayPush() {
 #ifdef DEBUG_SAFE_BOX
@@ -187,7 +236,7 @@ void hwDisplayPush() {
 #if BOARD_DISPLAY_PUSH_STREAMED
   // Streamed 2× upscale: one continuous QSPI transaction.
   // CS stays asserted across all rows so the panel never sees bus idle
-  // (which causes per-row draws to fail on this 2.16 panel revision).
+  // Some QSPI controllers cannot tolerate per-row idle gaps.
   s_gfx->startWrite();
   s_gfx->writeAddrWindow(BOARD_DISPLAY_OFFSET_X, BOARD_DISPLAY_OFFSET_Y,
                          BOARD_HW_W * 2, BOARD_HW_H * 2);
@@ -208,6 +257,23 @@ void hwDisplayPush() {
     s_gfx->writeBytes((uint8_t*)s_lineBuf, HW_W * 2 * 2);
   }
   s_gfx->endWrite();
+#elif defined(BOARD_DISPLAY_FULL_FRAME_1X) && BOARD_DISPLAY_FULL_FRAME_1X
+  static uint16_t* s_frameBuf = nullptr;
+  if (!s_frameBuf) {
+    s_frameBuf = (uint16_t*)heap_caps_malloc(
+        LCD_W_PHYS * LCD_H_PHYS * sizeof(uint16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_frameBuf) { Serial.println("hwDisplay: frameBuf alloc failed"); return; }
+  }
+
+  memset(s_frameBuf, 0, LCD_W_PHYS * LCD_H_PHYS * sizeof(uint16_t));
+  for (int y = 0; y < BOARD_HW_H; y++) {
+    uint16_t* dst = s_frameBuf + (y + BOARD_DISPLAY_OFFSET_Y) * LCD_W_PHYS + BOARD_DISPLAY_OFFSET_X;
+    for (int x = 0; x < BOARD_HW_W; x++) {
+      dst[x] = rotatedPixel(src, x, y);
+    }
+  }
+  s_gfx->draw16bitRGBBitmap(0, 0, s_frameBuf, LCD_W_PHYS, LCD_H_PHYS);
 #elif BOARD_DISPLAY_SCALE == 1
   // Native one-shot blit. Used on QSPI panels that can't tolerate
   // many small draw calls per frame and where memory budget can't
@@ -216,7 +282,7 @@ void hwDisplayPush() {
                             src, BOARD_HW_W, BOARD_HW_H);
 #else
   // 2× integer upscale, per-row, with optional centring offset.
-  // OFFSET_X/Y are 0 on full-fill boards (1.8).
+  // Optional centering offset for scaled panels.
   for (int y = 0; y < HW_H; y++) {
     uint16_t* row = src + y * HW_W;
     for (int x = 0; x < HW_W; x++) {
@@ -231,14 +297,15 @@ void hwDisplayPush() {
 #endif
 #endif
 
-  // Attention indicator: small red pill centered at the top of the
-  // panel. Inset well below the rounded bezel corners. Less intrusive
-  // than a full frame; reads as a "notification dot".
+  // Attention indicator: flashing circular ring around the round panel.
+  // Drawn after the frame push so it stays crisp and does not consume
+  // logical UI space.
   if (s_borderAlertOn) {
-    const int BAR_W = 200;
-    const int BAR_H = 8;
-    const int BAR_Y = 18;
-    const int BAR_X = (LCD_W_PHYS - BAR_W) / 2;
-    s_gfx->fillRoundRect(BAR_X, BAR_Y, BAR_W, BAR_H, BAR_H / 2, BORDER_RED);
+    const int cx = LCD_W_PHYS / 2;
+    const int cy = LCD_H_PHYS / 2;
+    const int r = (LCD_W_PHYS < LCD_H_PHYS ? LCD_W_PHYS : LCD_H_PHYS) / 2 - 7;
+    for (int i = 0; i < 5; i++) {
+      s_gfx->drawCircle(cx, cy, r - i, BORDER_RED);
+    }
   }
 }

@@ -1,11 +1,16 @@
 #include "hw/power.h"
 #include "hw/pins.h"
 #include <Wire.h>
-#include <XPowersLib.h>
 
+#if BOARD_HAS_AXP2101
+#include <XPowersLib.h>
 static XPowersPMU s_pmu;
+#endif
 
 bool hwPowerInit() {
+#if !BOARD_HAS_AXP2101
+  return true;
+#else
   if (!s_pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, PIN_I2C_SDA, PIN_I2C_SCL)) {
     Serial.println("hwPower: AXP2101 begin failed");
     return false;
@@ -17,14 +22,11 @@ bool hwPowerInit() {
   s_pmu.enableBattVoltageMeasure();
   s_pmu.enableTemperatureMeasure();
 
-  // ALDO3 → display rail on all three boards. enableALDO3() is idempotent.
+  // Display rail; enableALDO3() is idempotent.
   s_pmu.enableALDO3();
 
 #if BOARD_AXP_ENABLE_AUX_LDOS
-  // 2.16: ALDO2 powers DSI_PWR_EN (display power-enable signal via R13);
-  // ALDO1/4 power MIC bias and secondary sensor rails. Without this the
-  // panel stays dark even with ALDO3 enabled (DSI_PWR_EN floats).
-  // Voltages match the XiaoZhi 2.16 reference: ALDO1..4 = 3.3V, DCDC1 = 3.3V.
+  // Auxiliary rails for boards that need PMU-enabled display or sensor power.
   s_pmu.setDC1Voltage(3300);
   s_pmu.setALDO1Voltage(3300);
   s_pmu.setALDO2Voltage(3300);
@@ -35,8 +37,7 @@ bool hwPowerInit() {
 #endif
 
 #if BOARD_AXP_PWRON_4S_OFF
-  // 2.16: configure AXP to power off on 4 s PWRON-hold (the PWR key is
-  // the only software-configurable shutdown path on this board).
+  // Configure AXP to power off on 4 s PWRON-hold.
   // 0x22 reg: PWRON > OFFLEVEL as POWEROFF source. 0x27 reg: 4s timing.
   s_pmu.writeRegister(0x22, 0b110);
   s_pmu.writeRegister(0x27, 0x10);
@@ -49,9 +50,14 @@ bool hwPowerInit() {
   s_pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ | XPOWERS_AXP2101_PKEY_LONG_IRQ);
   s_pmu.clearIrqStatus();
   return true;
+#endif
 }
 
 HwBattery hwBattery() {
+#if !BOARD_HAS_AXP2101
+  HwBattery b{};
+  return b;
+#else
   HwBattery b;
   b.mV         = s_pmu.getBattVoltage();
   // AXP2101 (via XPowersLib) does not expose actual battery current,
@@ -66,22 +72,39 @@ HwBattery hwBattery() {
   b.charging   = s_pmu.isCharging();
   b.tempC      = (int)s_pmu.getTemperature();
   return b;
+#endif
 }
 
-void hwPowerOff() { s_pmu.shutdown(); }
+void hwPowerOff() {
+#if BOARD_HAS_AXP2101
+  s_pmu.shutdown();
+#endif
+}
 
 bool hwAxpPekeyShortPress() {
+#if !BOARD_HAS_AXP2101
+  return false;
+#else
   s_pmu.getIrqStatus();
   bool hit = s_pmu.isPekeyShortPressIrq();
   if (hit) s_pmu.clearIrqStatus();
   return hit;
+#endif
 }
 
 bool hwAxpPekeyLongPress() {
+#if !BOARD_HAS_AXP2101
+  return false;
+#else
   s_pmu.getIrqStatus();
   bool hit = s_pmu.isPekeyLongPressIrq();
   if (hit) s_pmu.clearIrqStatus();
   return hit;
+#endif
 }
 
-XPowersPMU* hwPmuRef() { return &s_pmu; }
+#if BOARD_HAS_AXP2101
+XPowersPMU* hwPmuRef() {
+  return &s_pmu;
+}
+#endif

@@ -256,8 +256,7 @@ bool characterInit(const char* name) {
 bool characterLoaded() { return loaded; }
 const Palette& characterPalette() { return pal; }
 
-// One-shot half-scale render to an arbitrary surface (was M5.Lcd for
-// the landscape clock; on AMOLED we keep the API for completeness).
+// One-shot half-scale render to an arbitrary surface.
 // Caller owns clearing. Advances frame timing so animation runs even
 // when characterTick() is bypassed.
 void characterRenderTo(Arduino_GFX* override, int cx, int cy) {

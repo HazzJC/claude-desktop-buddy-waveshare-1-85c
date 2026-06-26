@@ -18,9 +18,10 @@ struct HwTouch {
 
 bool hwInputInit();
 void hwInputUpdate();
+void hwInputSetRotation(uint8_t quarterTurns);
 
-HwBtn& hwBtnA();          // Key1 (GPIO0)
-HwBtn& hwBtnB();          // Key3 short-press (AXP IRQ 0x02)
+HwBtn& hwBtnA();          // primary control: BOOT button on GPIO0
+HwBtn& hwBtnB();          // secondary control: side slide switch on GPIO6
 uint8_t hwAxpBtnEvent();  // 0 / 0x02 / 0x04 — caller consumes 0x04
 
 const HwTouch& hwTouch();

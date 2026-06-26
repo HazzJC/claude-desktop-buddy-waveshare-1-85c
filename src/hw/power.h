@@ -20,5 +20,7 @@ void hwPowerOff();
 bool hwAxpPekeyShortPress();
 bool hwAxpPekeyLongPress();
 
+#if BOARD_HAS_AXP2101
 #include <XPowersLib.h>
 XPowersPMU* hwPmuRef();   // raw access for boards that need direct register / rail control
+#endif

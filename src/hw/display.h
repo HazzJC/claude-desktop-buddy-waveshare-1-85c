@@ -6,7 +6,7 @@
 constexpr int HW_W       = BOARD_HW_W;
 constexpr int HW_H       = BOARD_HW_H;
 
-// Logical-canvas safe-draw region for the rounded/circular AMOLED bezel.
+// Logical-canvas safe-draw region for the round LCD bezel.
 constexpr int SAFE_INSET = BOARD_SAFE_INSET;
 constexpr int SAFE_L     = SAFE_INSET;
 constexpr int SAFE_T     = SAFE_INSET;
@@ -19,4 +19,5 @@ bool hwDisplayInit();
 void hwDisplayPush();
 void hwDisplayBrightness(uint8_t lvl_0_4);
 void hwDisplaySleep(bool off);
+void hwDisplaySetRotation(uint8_t quarterTurns);
 Arduino_Canvas* hwCanvas();

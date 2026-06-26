@@ -1,14 +1,8 @@
 // src/hw/pins.h
 #pragma once
 
-#if defined(BOARD_WAVESHARE_ESP32S3_TOUCH_AMOLED_1_8)
-  #include "../boards/board_waveshare_esp32s3_touch_amoled_1_8.h"
-#elif defined(BOARD_WAVESHARE_ESP32S3_TOUCH_AMOLED_1_75C)
-  #include "../boards/board_waveshare_esp32s3_touch_amoled_1_75c.h"
-#elif defined(BOARD_WAVESHARE_ESP32C6_TOUCH_AMOLED_2_16)
-  #include "../boards/board_waveshare_esp32c6_touch_amoled_2_16.h"
-#elif defined(BOARD_WAVESHARE_ESP32S3_TOUCH_AMOLED_2_16)
-  #include "../boards/board_waveshare_esp32s3_touch_amoled_2_16.h"
-#else
-  #error "No board defined. Add -DBOARD_WAVESHARE_ESP32S3_TOUCH_AMOLED_1_8, _1_75C, _ESP32C6_TOUCH_AMOLED_2_16, or _ESP32S3_TOUCH_AMOLED_2_16 to build_flags in platformio.ini."
+#ifndef BOARD_WAVESHARE_ESP32S3_TOUCH_LCD_1_85C_V2
+  #error "This fork targets only the Waveshare ESP32-S3-Touch-LCD-1.85C V2 / Rev2.0."
 #endif
+
+#include "../boards/board_waveshare_esp32s3_touch_lcd_1_85c_v2.h"

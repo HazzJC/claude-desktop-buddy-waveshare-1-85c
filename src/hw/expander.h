@@ -11,4 +11,4 @@ extern Adafruit_XCA9554 g_expander;
 
 bool hwExpanderInit();          // false on I2C failure (TCA9554 path) or never fails (direct GPIO path)
 void hwExpanderResetSequence(); // pull LCD_RESET + TP_RESET low → 20ms → high
-bool hwExpanderAxpIrqLow();     // true while AXP IRQ is asserted; always true on 1.75C (poll via I2C)
+bool hwExpanderAxpIrqLow();

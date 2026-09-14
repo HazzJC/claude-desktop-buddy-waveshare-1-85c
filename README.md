@@ -2,9 +2,9 @@
 
 > A desk companion for makers using Claude Desktop developer mode: this firmware adapts Anthropic's Hardware Buddy reference implementation to the **Waveshare ESP32-S3-Touch-LCD-1.85C V2 / Rev2.0**, so an ESP32-S3 can display Claude activity and accept on-device approval decisions over encrypted Bluetooth LE.
 
-![Photograph of the Waveshare 1.85C hardware target running this firmware](image.jpg)
+> **No photo of this board exists in the repository yet.** `image.jpg` (inherited from before the 1.85C port existed) shows a different, square AMOLED board running an earlier contributor's own build — not the round Waveshare 1.85C V2 target this fork now compiles for. It is kept only as project history and must not be read as evidence this firmware runs on real 1.85C hardware. See [Hardware validation](#hardware-validation).
 
-This is a **single-board fork**, not a general Hardware Buddy distribution. It retains the upstream Nordic UART Service protocol, pairing flow, and desktop Hardware Buddy integration while replacing the original M5StickCPlus-specific hardware layer for the round 1.85C board.
+This is a **single-board fork**, not a general Hardware Buddy distribution. It retains the upstream Nordic UART Service protocol, pairing flow, and desktop Hardware Buddy integration while replacing the prior hardware layer for the round 1.85C board.
 
 ## At a glance
 
@@ -12,8 +12,8 @@ This is a **single-board fork**, not a general Hardware Buddy distribution. It r
 | --- | --- |
 | Target | Waveshare ESP32-S3-Touch-LCD-1.85C V2 / Rev2.0 only |
 | Desktop integration | Claude Desktop developer-mode Hardware Buddy flow; protocol documented in [REFERENCE.md](REFERENCE.md) |
-| Visual evidence | The repository photograph above is `image.jpg` |
-| Firmware build | A no-device PlatformIO compile workflow is included in [`.github/workflows/firmware-build.yml`](.github/workflows/firmware-build.yml). Its first default-branch run is still required before displaying a passing badge. |
+| Visual evidence of *this* board running this firmware | **None in the repo.** `image.jpg` is an older, unrelated board photo — see the note above. |
+| Firmware build | A no-device PlatformIO compile workflow is included in [`.github/workflows/firmware-build.yml`](.github/workflows/firmware-build.yml). As of this writing it has **not yet produced a run** on GitHub Actions (0 recorded runs) — it will run for the first time when this documentation is opened as a pull request. Confirm it passes before treating the build as verified. |
 | Local verification for this documentation update | **Not run**: PlatformIO was not installed in the local workspace; no board was connected. |
 | Physical-device verification | **Not claimed**. Use the checklist in [Hardware validation](#hardware-validation) after flashing a real V2 board. |
 
@@ -33,6 +33,16 @@ The port is deliberately more than a board name or pin remap. It replaces the ta
 | Claude activity may contain sensitive transcript snippets or tool hints | Require LE Secure Connections with MITM bonding and display a six-digit passkey on the device. See [`src/ble_bridge.cpp`](src/ble_bridge.cpp). |
 
 For a traceable change inventory, including the exact baseline and commit range inspected, see [the upstream contribution delta](docs/UPSTREAM_DELTA.md). It is preparation for an upstream discussion, **not** an upstream submission.
+
+### Codebase provenance — what is original here versus inherited
+
+Being precise about authorship matters more than the line-count of the diff, so here is the honest breakdown by commit history:
+
+- **Anthropic** wrote the original `claude-desktop-buddy` (initial commit `8ac960d`): the BLE protocol, desktop pairing flow, ASCII/GIF buddy system, and the reference M5StickCPlus hardware layer.
+- **Yadong Xie**, with contributions from `eMUQI` and `Wulu`, then authored roughly 100 commits porting that reference implementation to four *different*, AMOLED-screen Waveshare boards (1.8″, 1.75C, and 2.16″ on both ESP32-S3 and ESP32-C6). That work — none of which targets the round 1.85C LCD board this fork now ships — is what built the `src/boards/` capability-flag dispatcher, the `src/hw/` hardware-abstraction split, and the TCA9554/PMU/IMU plumbing this fork's port reuses. **This is not this author's work**, and the README previously did not make that distinction clearly enough.
+- **This author's (HazzJC) own commits** are `a278ba4` (the 1.85C V2 port itself), `9824938` (Bluetooth always-discoverable fix), and `2975a99` (guided demo and interaction wake hold) — three commits, 1,524 insertions and 1,132 deletions across 26 files. That single port commit deleted the four AMOLED board headers Yadong Xie had added, wrote the new `board_waveshare_esp32s3_touch_lcd_1_85c_v2.h`, swapped the display driver from `Arduino_CO5300`/SH8601 (AMOLED) to `Arduino_ST77916` (this board's QSPI round LCD), remapped touch from FT3168 to CST816, and reworked `src/hw/display.cpp`, `src/hw/input.cpp`, `src/hw/expander.cpp`, and `platformio.ini` accordingly. It is a genuine, board-specific port — but it stands on an existing multi-board framework it did not create.
+
+In short: the *pattern* (board dispatcher + capability flags + hw abstraction) is inherited from prior contributors' work on other boards; the *round-display ST77916/CST816 1.85C implementation inside that pattern* is this author's own.
 
 ## Architecture
 
@@ -116,6 +126,13 @@ No physical run was performed for this README/CI change. Before calling a releas
 - LittleFS first-boot/character-pack behaviour; and
 - the board-specific power, sleep, RTC, and audio paths that the intended deployment uses.
 
+<details>
+<summary>About <code>image.jpg</code></summary>
+
+The file at the repo root (`image.jpg`) was added before the 1.85C port existed, by a different contributor, and shows a square AMOLED board with a custom "yadong's Buddy" pet name on screen — not the round 1.85C V2 target. It is kept as repository history only; it is not evidence for this board and should not be captioned as such anywhere it is reused.
+
+</details>
+
 ## Current limitations
 
 - This firmware is scoped to the 1.85C V2 / Rev2.0 board. Other Waveshare boards need their own port and validation.
@@ -141,6 +158,8 @@ docs/           manual, upstream-delta record, and validation context
 
 ## Attribution and licensing
 
-This repository is a fork of [Anthropic's `claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy), whose initial commit is present in this repository history. The root [MIT license](LICENSE) retains Anthropic's copyright notice.
+This repository's history traces back to [Anthropic's `claude-desktop-buddy`](https://github.com/anthropics/claude-desktop-buddy) (initial commit `8ac960d`, present in this repository's history), the reference BLE Hardware Buddy implementation for Claude Desktop developer mode. Between that initial commit and this author's own port, the codebase passed through roughly 100 commits of multi-board porting work by other contributors (chiefly Yadong Xie, with `eMUQI` and `Wulu`) that this fork did not author — see [Codebase provenance](#codebase-provenance--what-is-original-here-versus-inherited) above and [`docs/UPSTREAM_DELTA.md`](docs/UPSTREAM_DELTA.md) for the full, commit-level breakdown of what is original to this fork versus inherited.
 
-Vendored libraries and artwork retain their own terms: [`lib/Arduino_DriveBus/LICENSE`](lib/Arduino_DriveBus/LICENSE) covers the Arduino_DriveBus copy, and [`characters/bufo/README.md`](characters/bufo/README.md) documents the separate third-party artwork attribution. Do not assume those assets inherit the root MIT licence.
+The root [MIT license](LICENSE) is copyright Anthropic, PBC, and this fork keeps that notice and licence as-is — no relicensing has been done or is intended. The MIT terms require the copyright notice and permission notice to be kept in copies of the software, and (per `LICENSE`) explicitly carve out the `characters/bufo/` GIF set, which is third-party community artwork and is **not** covered by the MIT grant.
+
+Vendored libraries retain their own terms: [`lib/Arduino_DriveBus/LICENSE`](lib/Arduino_DriveBus/LICENSE) covers the Arduino_DriveBus copy (added while porting to the AMOLED boards and reused here for the shared BLE stack), and [`characters/bufo/README.md`](characters/bufo/README.md) documents the bufo artwork attribution. Do not assume any vendored library or art asset inherits the root MIT licence — check its own file first.

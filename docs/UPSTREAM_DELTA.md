@@ -11,17 +11,18 @@ The upstream repository's own contribution guidance says board ports belong in f
 | Item | Recorded evidence |
 | --- | --- |
 | Upstream source | [anthropics/claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy), also linked by the original `README.md` in this repository history |
-| Local history baseline | `8ac960d` — `Initial release` (2026-04-09) |
+| Local history baseline | `8ac960d` — `Initial release` (2026-04-09), authored by Anthropic (Felix Rieseberg) |
+| Intermediate multi-board work (not this author's) | `a280c64..61a0ce9` — roughly 100 commits by Yadong Xie, with `eMUQI` and `Wulu`, porting the reference firmware to four AMOLED Waveshare boards (1.8″, 1.75C, 2.16″ S3, 2.16″ C6). None of those targets is the 1.85C V2 round LCD board this fork ships. This range built the `src/boards/` dispatcher pattern, the `src/hw/` abstraction split, and the TCA9554/AXP2101/IMU plumbing this fork's port reuses. |
+| This author's commit range | `a278ba4..2975a99` — `Port firmware to Waveshare 1.85C touch LCD`, `Keep Bluetooth always discoverable`, `Add guided demo and interaction wake hold` (2026-06-26) |
 | Current source inspected | `2975a99` — `Add guided demo and interaction wake hold` (2026-06-26) |
-| Target-port introduction | `a278ba4` — `Port firmware to Waveshare 1.85C touch LCD` (2026-06-26) |
 | Remote configuration at audit | Only `origin` is configured; no separate `upstream` remote was present |
 | Licence boundary | Root MIT licence is copyright Anthropic, PBC; bundled libraries and `bufo` art carry separate notices |
 
-At `2975a99`, `git diff --stat 8ac960d..HEAD` records 90 changed paths, 10,072 insertions, and 815 deletions. That is the exact repository-history delta to inspect, not a claim that every line is independently upstreamable.
+At `2975a99`, `git diff --stat 8ac960d..HEAD` records 90 changed paths, 10,072 insertions, and 815 deletions across the *entire* repository history since the initial release. That figure is dominated by the ~100-commit, multi-board AMOLED porting effort by other contributors described above — **it is not a measure of this author's own contribution.** This author's own commits are the much smaller, separately-called-out range below.
 
-## Board-specific implementation delta
+## Board-specific implementation delta (this author's own work)
 
-The current target-port commit range (`61a0ce9..2975a99`) changes 26 paths: 1,524 insertions and 1,132 deletions. The meaningful board adaptation is:
+This author's target-port commit range (`61a0ce9..2975a99` — i.e. everything after the last commit not authored by HazzJC) changes 26 paths: 1,524 insertions and 1,132 deletions, entirely within three commits (`a278ba4`, `9824938`, `2975a99`) by this repository's owner. The meaningful board adaptation is:
 
 1. **Single environment and board selector.** `platformio.ini` removes the previous multi-board environments and selects `waveshare-esp32s3-touch-lcd-1-85c-v2` with the ESP32-S3, OPI PSRAM, QIO flash, 8 MB partition layout, LittleFS, and `ble_bridge.cpp` source selection.
 2. **Board declaration.** `src/boards/board_waveshare_esp32s3_touch_lcd_1_85c_v2.h` defines the 360 × 360 ST77916 QSPI panel, I2C bus, CST816 interrupt, GPIO0 BOOT input, GPIO6 side switch, I2S audio pins, TCA9554 reset pins, RTC capability, display offsets, and the board-specific capability flags.

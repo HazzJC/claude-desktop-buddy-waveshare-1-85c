@@ -4,6 +4,9 @@
 
 > **No photo of this board exists in the repository yet.** `image.jpg` (inherited from before the 1.85C port existed) shows a different, square AMOLED board running an earlier contributor's own build — not the round Waveshare 1.85C V2 target this fork now compiles for. It is kept only as project history and must not be read as evidence this firmware runs on real 1.85C hardware. See [Hardware validation](#hardware-validation).
 
+![Claude Desktop Buddy Waveshare 1.85C concept render and architecture](docs/social-preview.png)
+*Hardware concept render and firmware architecture for the Waveshare ESP32-S3 round touchscreen.*
+
 This is a **single-board fork**, not a general Hardware Buddy distribution. It retains the upstream Nordic UART Service protocol, pairing flow, and desktop Hardware Buddy integration while replacing the prior hardware layer for the round 1.85C board.
 
 ## At a glance

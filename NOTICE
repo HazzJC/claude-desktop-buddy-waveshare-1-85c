@@ -1,0 +1,13 @@
+Claude Desktop Buddy — Waveshare ESP32-S3-Touch-LCD-1.85C Port
+Copyright (c) 2026 Anthropic, PBC (original Hardware Buddy reference implementation)
+Copyright (c) 2026 Yadong Xie and contributors (multi-board framework)
+Copyright (c) 2026 Harry Chapman (Waveshare ESP32-S3-Touch-LCD-1.85C V2 hardware port)
+
+Firmware Code License:
+The firmware source code in this repository is licensed under the MIT License (see LICENSE).
+
+Bundled Third-Party Hardware Libraries:
+- lib/Adafruit_XCA9554: Copyright (c) 2022 Ladyada for Adafruit Industries. Licensed under the BSD 3-Clause License (see lib/Adafruit_XCA9554/license.txt).
+
+Restricted Third-Party Character Assets (Excluded from MIT License):
+- The GIF assets in characters/bufo/ are from the community "bufo" emoji set (https://bufo.zone). They are third-party artwork redistributed for convenience and are NOT covered by the MIT license in LICENSE; all rights remain with their original creators. See characters/bufo/README.md.
